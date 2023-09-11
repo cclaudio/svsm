@@ -11,6 +11,7 @@ use crate::mm::virt_to_phys;
 use crate::types::{PAGE_SHIFT, PAGE_SIZE};
 use crate::utils::{align_up, zero_mem_region};
 use core::alloc::{GlobalAlloc, Layout};
+use core::cmp;
 use core::mem::size_of;
 use core::ptr;
 use log;
@@ -1280,6 +1281,37 @@ unsafe impl GlobalAlloc for SvsmAllocator {
             }
         }
     }
+
+    /// Default GlobalAllocator implementation
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size();
+        // SAFETY: the safety contract for `alloc` must be upheld by the caller.
+        let ptr = unsafe { self.alloc(layout) };
+        if !ptr.is_null() {
+            // SAFETY: as allocation succeeded, the region from `ptr`
+            // of size `size` is guaranteed to be valid for writes.
+            unsafe { ptr::write_bytes(ptr, 0, size) };
+        }
+        ptr
+    }
+
+    /// Default GlobalAllocator implementation
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller must ensure that the `new_size` does not overflow.
+        // `layout.align()` comes from a `Layout` and is thus guaranteed to be valid.
+        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        // SAFETY: the caller must ensure that `new_layout` is greater than zero.
+        let new_ptr = unsafe { self.alloc(new_layout) };
+        if !new_ptr.is_null() {
+            // SAFETY: the previously allocated block cannot overlap the newly allocated block.
+            // The safety contract for `dealloc` must be upheld by the caller.
+            unsafe {
+                ptr::copy_nonoverlapping(ptr, new_ptr, cmp::min(layout.size(), new_size));
+                self.dealloc(ptr, layout);
+            }
+        }
+        new_ptr
+    }
 }
 
 #[cfg_attr(not(test), global_allocator)]
@@ -1299,6 +1331,52 @@ pub fn root_mem_init(pstart: PhysAddr, vstart: VirtAddr, page_count: usize) {
         .lock()
         .init()
         .expect("Failed to initialize SLAB_PAGE_SLAB");
+}
+
+pub fn mem_allocate(layout: Layout) -> *mut u8 {
+    unsafe { ALLOCATOR.alloc(layout) }
+}
+
+pub fn mem_reallocate(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    unsafe { ALLOCATOR.realloc(ptr, layout, new_size) }
+}
+
+pub fn mem_deallocate(ptr: *mut u8, layout: Layout) {
+    unsafe { ALLOCATOR.dealloc(ptr, layout) }
+}
+
+pub const MIN_ALIGN: usize = 32;
+
+pub fn layout_from_size(size: usize) -> Layout {
+    let align: usize = {
+        if (size % PAGE_SIZE) == 0 {
+            PAGE_SIZE
+        } else {
+            MIN_ALIGN
+        }
+    };
+    Layout::from_size_align(size, align).unwrap()
+}
+
+pub fn layout_from_ptr(ptr: *mut u8) -> Layout {
+    let va = VirtAddr::from(ptr);
+    let info: Page = ROOT_MEM.lock().get_page_info(va).unwrap();
+
+    match info {
+        Page::Allocated(ai) => {
+            let base: usize = 2;
+            let size: usize = base.pow(ai.order as u32) * PAGE_SIZE;
+            Layout::from_size_align(size, PAGE_SIZE).unwrap()
+        },
+        Page::SlabPage(si) => {
+            let slab: *const Slab = si.slab.as_ptr();
+            let size: usize = unsafe { (*slab).common.item_size as usize };
+            Layout::from_size_align(size, size).unwrap()
+        }
+        _ => {
+            panic!("Layout_from_ptr: Unexpected page type in MemoryRegion::free_page()");
+        }
+    }
 }
 
 #[cfg(test)]
