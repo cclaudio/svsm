@@ -17,7 +17,7 @@ LIBS = $(LIBCRT) $(LIBCRYPTO) $(LIBTPM) $(LIBPLATFORM)
 OPENSSL_MAKEFILE = $(OPENSSL_DIR)/Makefile
 MSTPM_MAKEFILE = $(MSTPM_DIR)/Makefile
 
-all: libvtpm.a
+all: libvtpm.a bindings.rs
 
 libvtpm.a: $(LIBS)
 	rm -f $@
@@ -37,6 +37,22 @@ $(LIBTPM): $(MSTPM_MAKEFILE) $(LIBCRYPTO)
 
 $(LIBPLATFORM): $(MSTPM_MAKEFILE) $(LIBCRYPTO)
 	$(MAKE) -C $(MSTPM_DIR) $(LIBPLATFORM_A)
+
+# bindings.rs
+BINDGEN = ${HOME}/.cargo/bin/bindgen
+BINDGEN_FLAGS = --use-core
+CLANG_FLAGS = -Wno-incompatible-library-redeclaration
+
+$(BINDGEN):
+	cargo install bindgen-cli
+
+bindings.rs: libvtpm.h $(BINDGEN)
+	echo "#![allow(non_upper_case_globals)]" > $@
+	echo "#![allow(non_camel_case_types)]" >> $@
+	echo "#![allow(non_snake_case)]" >> $@
+	echo "#![allow(unused)]" >> $@
+	echo "#![allow(improper_ctypes)]" >> $@
+	$(BINDGEN) $(BINDGEN_FLAGS) libvtpm.h -- $(CLANG_FLAGS) >> $@
 
 $(OPENSSL_MAKEFILE):
 	(cd $(OPENSSL_DIR) && git checkout OpenSSL_1_1_1q  && \
@@ -113,6 +129,7 @@ clean:
 	rm -f libvtpm.a
 
 distclean: clean
+	rm -f bindings.rs
 	rm -f $(OPENSSL_MAKEFILE)
 	rm -f $(MSTPM_MAKEFILE)
 
