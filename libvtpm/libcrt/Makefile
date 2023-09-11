@@ -24,6 +24,7 @@ OBJS += src/exit/assert.o
 
 # prng
 OBJS += src/prng/rand.o
+OBJS += src/prng/rand_pool.o
 
 # setjmp
 OBJS += $(addprefix src/setjmp/x86_64/, \
