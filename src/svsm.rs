@@ -478,6 +478,11 @@ pub extern "C" fn svsm_main() {
         prepare_fw_launch(fw_meta).expect("Failed to setup guest VMSA");
     }
 
+    #[cfg(any(not(test), rust_analyzer))]
+    if let Err(e) = svsm::vtpm::mssim::mssim_vtpm_init() {
+        panic!("vTPM failed to initialize - {:?}", e);
+    }
+
     virt_log_usage();
 
     if fw_metadata.is_some() {

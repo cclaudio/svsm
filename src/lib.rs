@@ -39,6 +39,7 @@ pub mod svsm_paging;
 pub mod task;
 pub mod types;
 pub mod utils;
+#[cfg(any(not(test), rust_analyzer))]
 pub mod vtpm;
 
 #[test]
