@@ -11,17 +11,123 @@
 // because we are not compiling the TPM Simulator (-DSIMULATION=NO), as it brings in more
 // dependencies on libc and a higher memory footprint.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::ffi::c_void;
+use core::ptr::{copy_nonoverlapping, write_bytes};
 
 use crate::address::VirtAddr;
+use crate::mm::{GuestPtr, PAGE_SIZE};
 use crate::protocols::errors::SvsmReqError;
+use crate::protocols::vtpm::{TpmSendCommandRequest, TpmSendCommandResponse};
 use crate::vtpm::bindings::{
-    _plat__NVDisable, _plat__NVEnable, _plat__SetNvAvail, _plat__Signal_PowerOn,
-    _plat__Signal_Reset,
+    _plat__LocalitySet, _plat__NVDisable, _plat__NVEnable, _plat__RunCommand, _plat__SetNvAvail,
+    _plat__Signal_PowerOn, _plat__Signal_Reset,
 };
 use crate::vtpm::mstpm::{mstpm_manufacture, mstpm_teardown};
 
+pub const TPM_BUFFER_MAX_SIZE: usize = PAGE_SIZE;
+
 static mut VTPM_IS_POWERED_ON: bool = false;
+
+/// Current MSSIM TPM commands we support. A complete list can be found in:
+/// libvtpm/ms-tpm-20-ref/TPMCmd/Simulator/include/TpmTcpProtocol.h
+const TPM_SEND_COMMAND: u32 = 8;
+
+const TPM_SUPPORTED_CMDS: &[u32] = &[TPM_SEND_COMMAND];
+
+pub fn mssim_platform_supported_commands() -> u64 {
+    let mut bitmap: u64 = 0;
+
+    for cmd in TPM_SUPPORTED_CMDS {
+        bitmap |= 1u64 << *cmd;
+    }
+
+    bitmap
+}
+
+pub fn mssim_platform_request(command: u32, buffer: VirtAddr) -> Result<(), SvsmReqError> {
+    match command {
+        TPM_SEND_COMMAND => {
+            mssim_send_tpm_command(buffer)?;
+        }
+        _ => return Err(SvsmReqError::unsupported_call()),
+    }
+
+    Ok(())
+}
+
+/// Send a TPM command for a given locality
+pub fn mssim_send_tpm_command(buffer: VirtAddr) -> Result<(), SvsmReqError> {
+    const REQ_INBUF_OFFSET: usize = core::mem::size_of::<TpmSendCommandRequest>();
+
+    let guest_page = GuestPtr::<TpmSendCommandRequest>::new(buffer);
+    let request = guest_page.read()?;
+
+    // TODO: Before implementing locality, we need to agree what it means
+    // to the platform
+    if request.locality != 0 {
+        return Err(SvsmReqError::invalid_parameter());
+    }
+    unsafe {
+        if !VTPM_IS_POWERED_ON {
+            return Err(SvsmReqError::invalid_request());
+        }
+    }
+
+    let mut inbuf: Vec<u8> = Vec::with_capacity(TPM_BUFFER_MAX_SIZE);
+    let inbuf_p: *mut u8 = inbuf.as_mut_ptr();
+
+    let mut outbuf: Vec<u8> = Vec::with_capacity(TPM_BUFFER_MAX_SIZE);
+    let mut outbuf_p: *mut u8 = outbuf.as_mut_ptr();
+    let outbuf_pp: *mut *mut u8 = &mut outbuf_p;
+
+    let mut outbuf_size = TPM_BUFFER_MAX_SIZE as u32;
+    let outbuf_size_p = &mut outbuf_size;
+
+    unsafe {
+        // let b = core::slice::from_raw_parts(buffer.as_ptr::<u8>().add(REQ_INBUF_OFFSET), request.inbuf_size as usize);
+        // let sz = request.inbuf_size;
+        // log::info!("vTPM request buf({}) {:x?}", sz, b);
+
+        copy_nonoverlapping(
+            buffer.as_mut_ptr::<u8>().add(REQ_INBUF_OFFSET),
+            inbuf_p,
+            request.inbuf_size as usize,
+        );
+
+        _plat__LocalitySet(request.locality);
+
+        _plat__RunCommand(request.inbuf_size, inbuf_p, outbuf_size_p, outbuf_pp);
+        outbuf.set_len(*outbuf_size_p as usize);
+
+        // log::info!("vTPM response buf({}) {:x?}", *outbuf_size_p, outbuf);
+    }
+
+    // Request buffer not large enough to hold the response
+    let max_out_buf_size = TPM_BUFFER_MAX_SIZE - core::mem::size_of::<TpmSendCommandResponse>();
+    if *outbuf_size_p == 0 || *outbuf_size_p as usize > max_out_buf_size {
+        return Err(SvsmReqError::invalid_parameter());
+    }
+
+    // Populate buffer with size and data
+    unsafe {
+        write_bytes(buffer.as_mut_ptr::<u8>(), 0, PAGE_SIZE);
+        copy_nonoverlapping(
+            outbuf_size_p as *const _ as *const u8,
+            buffer.as_mut_ptr::<u8>(),
+            4usize,
+        );
+        copy_nonoverlapping(
+            outbuf.as_ptr() as *const u8,
+            buffer.as_mut_ptr::<u8>().add(4),
+            outbuf_size as usize,
+        );
+    }
+
+    Ok(())
+}
 
 /// Initialize the vTPM
 pub fn mssim_vtpm_init() -> Result<(), SvsmReqError> {
