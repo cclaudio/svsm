@@ -9,6 +9,9 @@ pub mod errors;
 
 use crate::sev::vmsa::{GuestVMExit, VMSA};
 
+// SVSM protocols
+pub const SVSM_CORE_PROTOCOL: u32 = 0;
+
 #[derive(Debug, Default)]
 pub struct RequestParams {
     pub guest_exit_code: GuestVMExit,
