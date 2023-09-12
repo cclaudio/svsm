@@ -1,3 +1,6 @@
 [submodule "libvtpm/openssl"]
 	path = libvtpm/openssl
 	url = https://github.com/openssl/openssl.git
+[submodule "libvtpm/ms-tpm-20-ref"]
+	path = libvtpm/ms-tpm-20-ref
+	url = https://github.com/microsoft/ms-tpm-20-ref.git
