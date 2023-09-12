@@ -6,5 +6,9 @@
 
 /// C bindings
 pub mod bindings;
+/// MS TPM2 functions
+pub mod mstpm;
+/// MS Simulator functions
+pub mod mssim;
 /// Wrappers called in C
 pub mod wrapper;

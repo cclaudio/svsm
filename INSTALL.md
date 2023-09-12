@@ -112,9 +112,9 @@ COCONUT-SVSM code base. To build the OVMF binary for the guest, checkout
 this repository:
 
 ```
-$ git clone https://github.com/coconut-svsm/edk2.git
-$ cd edk2/
-$ git checkout svsm
+$ git clone https://github.com/svsm-vtpm/ovmf.git
+$ cd ovmf/
+$ git checkout coconut-svsm-vtpm
 $ git submodule init
 $ git submodule update
 ```
@@ -133,8 +133,8 @@ build the firmware:
 $ export PYTHON3_ENABLE=TRUE
 $ export PYTHON_COMMAND=python3
 $ make -j16 -C BaseTools/
-$ source ./edksetup.sh
-$ build -a X64 -b DEBUG -t GCC5 -D DEBUG_ON_SERIAL_PORT -D DEBUG_VERBOSE -p OvmfPkg/OvmfPkgX64.dsc
+$ source ./edksetup.sh --reconfig
+$ build -a X64 -b DEBUG -t GCC5 -D DEBUG_ON_SERIAL_PORT -D DEBUG_VERBOSE -DTPM2_ENABLE -p OvmfPkg/OvmfPkgX64.dsc
 ```
 
 This will build the OVMF code and variable binaries to use with QEMU.
@@ -157,9 +157,9 @@ Otherwise you need to build a new guest kernel. From within the guest
 image, do:
 
 ```
-$ git clone https://github.com/coconut-svsm/linux
+$ git clone https://github.com/svsm-vtpm/linux
 $ cd linux
-$ git checkout svsm-guest
+$ git checkout coconut-svsm-vtpm-guest
 ```
 
 Build a kernel from that branch and install it in the guest image. For

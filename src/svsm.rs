@@ -460,6 +460,11 @@ pub extern "C" fn svsm_main() {
         panic!("Failed to validate flash memory: {:#?}", e);
     }
 
+    #[cfg(any(not(test), rust_analyzer))]
+    if let Err(e) = svsm::vtpm::mssim::mssim_vtpm_init() {
+        log::error!("vTPM failed to initialize - {:?}", e);
+    }
+
     prepare_fw_launch(&fw_meta).expect("Failed to setup guest VMSA");
 
     virt_log_usage();
