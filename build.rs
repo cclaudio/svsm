@@ -17,6 +17,8 @@ fn main() {
     println!("cargo:rustc-link-arg-bin=svsm=--no-relax");
     println!("cargo:rustc-link-arg-bin=svsm=-Tsvsm.lds");
     println!("cargo:rustc-link-arg-bin=svsm=-no-pie");
+    println!("cargo:rustc-link-arg-bin=svsm=-Llibvtpm");
+    println!("cargo:rustc-link-arg-bin=svsm=-lvtpm");
 
     // Extra linker args for tests.
     println!("cargo:rerun-if-env-changed=LINK_TEST");
