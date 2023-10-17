@@ -1,14 +1,21 @@
 LIBCRT_DIR = $(CURDIR)/libcrt
 OPENSSL_DIR = $(CURDIR)/openssl
+MSTPM_DIR = $(CURDIR)/ms-tpm-20-ref/TPMCmd
 
 LIBCRT = $(LIBCRT_DIR)/libcrt.a
 
 LIBCRYPTO = $(OPENSSL_DIR)/libcrypto.a
 
+LIBTPM_A = tpm/src/libtpm.a
+LIBTPM = $(MSTPM_DIR)/$(LIBTPM_A)
+
+LIBPLATFORM_A = Platform/src/libplatform.a
+LIBPLATFORM = $(MSTPM_DIR)/$(LIBPLATFORM_A)
 
 OPENSSL_MAKEFILE = $(OPENSSL_DIR)/Makefile
+MSTPM_MAKEFILE = $(MSTPM_DIR)/Makefile
 
-LIBS = $(LIBCRT) $(LIBCRYPTO)
+LIBS = $(LIBCRT) $(LIBCRYPTO) $(LIBTPM) $(LIBPLATFORM)
 
 all: libvtpm.a
 
@@ -79,12 +86,34 @@ $(OPENSSL_MAKEFILE):
 			-I$(LIBCRT_DIR)/include \
 			-Wl,rpath=$(LIBCRT_DIR) -lcrt -g -O0)
 
+# ms-tpm
+$(LIBTPM): $(MSTPM_MAKEFILE) $(LIBCRYPTO)
+	$(MAKE) -C $(MSTPM_DIR) $(LIBTPM_A)
+
+$(LIBPLATFORM): $(MSTPM_MAKEFILE) $(LIBCRYPTO)
+	$(MAKE) -C $(MSTPM_DIR) $(LIBPLATFORM_A)
+
+MSTPM_CFLAGS := -static -nostdinc -fno-stack-protector -fPIE
+MSTPM_CFLAGS += -DSIMULATION=NO -DEPHEMERAL_NV -DVTPM -DHASH_LIB=Ossl -DSYM_LIB=Ossl -DMATH_LIB=Ossl -DSELF_TEST=NO
+MSTPM_CFLAGS += -I$(LIBCRT_DIR)/include
+MSTPM_CFLAGS += -I$(OPENSSL_DIR)/include
+
+$(MSTPM_MAKEFILE):
+	(cd $(MSTPM_DIR) && \
+		./bootstrap && \
+		./configure \
+			--with-crypto-engine=Ossl \
+			CFLAGS="${MSTPM_CFLAGS}" \
+			LIBCRYPTO_LIBS="${$(LIBCRT) $(LIBCRYPTO)}")
+
 clean:
 	make -C $(LIBCRT_DIR) clean
 	make -C $(OPENSSL_DIR) clean
+	make -C $(MSTPM_DIR) clean
 	rm -f libvtpm.a
 
 distclean: clean
 	rm -f $(OPENSSL_MAKEFILE)
+	rm -f $(MSTPM_MAKEFILE)
 
 .PHONY: all clean distclean
