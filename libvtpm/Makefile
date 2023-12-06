@@ -17,7 +17,7 @@ MSTPM_MAKEFILE = $(MSTPM_DIR)/Makefile
 
 LIBS = $(LIBCRT) $(LIBCRYPTO) $(LIBTPM) $(LIBPLATFORM)
 
-all: libvtpm.a
+all: libvtpm.a bindings.rs
 
 libvtpm.a: $(LIBS)
 	rm -f $@
@@ -106,6 +106,22 @@ $(MSTPM_MAKEFILE):
 			CFLAGS="${MSTPM_CFLAGS}" \
 			LIBCRYPTO_LIBS="${$(LIBCRT) $(LIBCRYPTO)}")
 
+# bindings.rs
+BINDGEN = ${HOME}/.cargo/bin/bindgen
+BINDGEN_FLAGS = --use-core
+CLANG_FLAGS = -Wno-incompatible-library-redeclaration
+
+$(BINDGEN):
+	cargo install bindgen-cli
+
+bindings.rs: libvtpm.h $(BINDGEN) $(LIBTPM)
+	echo "#![allow(non_upper_case_globals)]" > $@
+	echo "#![allow(non_camel_case_types)]" >> $@
+	echo "#![allow(non_snake_case)]" >> $@
+	echo "#![allow(unused)]" >> $@
+	echo "#![allow(improper_ctypes)]" >> $@
+	$(BINDGEN) $(BINDGEN_FLAGS) libvtpm.h -- $(CLANG_FLAGS) >> $@
+
 clean:
 	make -C $(LIBCRT_DIR) clean
 	make -C $(OPENSSL_DIR) clean
@@ -113,6 +129,7 @@ clean:
 	rm -f libvtpm.a
 
 distclean: clean
+	rm -f bindings.rs
 	rm -f $(OPENSSL_MAKEFILE)
 	rm -f $(MSTPM_MAKEFILE)
 
