@@ -17,3 +17,12 @@ int  _plat__NVEnable(void *platParameter);
 
 int  TPM_Manufacture(int firstTime);
 int  TPM_TearDown(void);
+
+#include <stdint.h>
+
+#include <tpm/include/Tpm.h>
+#include <tpm/include/TpmTypes.h>
+
+#include <tpm/include/prototypes/CreatePrimary_fp.h>
+#include <tpm/include/prototypes/FlushContext_fp.h>
+#include <tpm/include/prototypes/Marshal_fp.h>

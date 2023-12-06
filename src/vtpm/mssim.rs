@@ -25,6 +25,7 @@ use crate::vtpm::bindings::{
     _plat__LocalitySet, _plat__NVDisable, _plat__NVEnable, _plat__RunCommand, _plat__SetNvAvail,
     _plat__Signal_PowerOn, _plat__Signal_Reset,
 };
+use crate::vtpm::ek::{create_tpm_ek, get_tpm_ek};
 use crate::vtpm::mstpm::{mstpm_manufacture, mstpm_teardown};
 
 pub const TPM_BUFFER_MAX_SIZE: usize = PAGE_SIZE;
@@ -163,6 +164,9 @@ pub fn mssim_vtpm_init() -> Result<(), SvsmReqError> {
     mssim_signal_nvon()?;
 
     log::info!("vTPM manufactured");
+
+    create_tpm_ek();
+    log::info!("Marshaled EK pub: {:0>2x?}", get_tpm_ek());
 
     Ok(())
 }

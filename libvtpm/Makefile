@@ -108,8 +108,8 @@ $(MSTPM_MAKEFILE):
 
 # bindings.rs
 BINDGEN = ${HOME}/.cargo/bin/bindgen
-BINDGEN_FLAGS = --use-core
-CLANG_FLAGS = -Wno-incompatible-library-redeclaration
+BINDGEN_FLAGS = --use-core --impl-debug
+CLANG_FLAGS = -Wno-incompatible-library-redeclaration -I$(MSTPM_DIR) -I$(MSTPM_DIR)/tpm/include/prototypes -I$(MSTPM_DIR)/Platform/include/prototypes -I$(LIBCRT_DIR)/include -I $(OPENSSL_DIR)/include -nostdinc
 
 $(BINDGEN):
 	cargo install bindgen-cli
