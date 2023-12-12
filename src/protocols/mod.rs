@@ -4,8 +4,10 @@
 //
 // Author: Dov Murik <dovmurik@linux.ibm.com>
 
+pub mod attestation;
 pub mod core;
 pub mod errors;
+pub mod services_manifest;
 #[cfg(any(not(test), rust_analyzer))]
 pub mod vtpm;
 
@@ -13,6 +15,7 @@ use crate::sev::vmsa::{GuestVMExit, VMSA};
 
 // SVSM protocols
 pub const SVSM_CORE_PROTOCOL: u32 = 0;
+pub const SVSM_ATTESTATION_PROTOCOL: u32 = 1;
 pub const SVSM_VTPM_PROTOCOL: u32 = 2;
 
 #[derive(Debug, Default, Clone, Copy)]

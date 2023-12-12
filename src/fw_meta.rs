@@ -54,7 +54,7 @@ fn from_hex(c: char) -> Result<u8, SvsmError> {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct Uuid {
+pub struct Uuid {
     data: [u8; 16],
 }
 
