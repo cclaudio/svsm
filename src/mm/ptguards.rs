@@ -77,6 +77,10 @@ impl PerCPUPageMappingGuard {
     pub fn virt_addr(&self) -> VirtAddr {
         self.mapping.start()
     }
+
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
 }
 
 impl Drop for PerCPUPageMappingGuard {

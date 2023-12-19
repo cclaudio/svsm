@@ -9,6 +9,10 @@
 pub mod aead {
     //! API for authentication encryption with associated data
 
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+
     use crate::{protocols::errors::SvsmReqError, sev::secrets_page::VMPCK_SIZE};
 
     // Message Header Format (AMD SEV-SNP spec. table 98)
@@ -30,22 +34,19 @@ pub mod aead {
         /// * `key`: 256-bit key
         /// * `aad`: Additional authenticated data
         /// * `inbuf`: Cleartext buffer to be encrypted
-        /// * `outbuf`: Buffer to store the encrypted data, it must be large enough to also
-        ///             hold the authenticated tag.
         ///
         /// # Returns
         ///
         /// * Success
-        ///     * `usize`: Number of bytes written to `outbuf`
+        ///     * `Vec<u8>`: Encrypted `inbuf`
         /// * Error
         ///     * [SvsmReqError]
         fn encrypt(
-            iv: &[u8; IV_SIZE],
-            key: &[u8; KEY_SIZE],
+            iv: &[u8],
+            key: &[u8],
             aad: &[u8],
             inbuf: &[u8],
-            outbuf: &mut [u8],
-        ) -> Result<usize, SvsmReqError>;
+        ) -> Result<Vec<u8>, SvsmReqError>;
 
         /// Decrypt the provided buffer using AES-256 GCM
         ///
@@ -55,21 +56,19 @@ pub mod aead {
         /// * `key`: 256-bit key
         /// * `aad`: Additional authenticated data
         /// * `inbuf`: Cleartext buffer to be decrypted, followed by the authenticated tag
-        /// * `outbuf`: Buffer to store the decrypted data
         ///
         /// # Returns
         ///
         /// * Success
-        ///     * `usize`: Number of bytes written to `outbuf`
+        ///     * `Vec<u8>`: Decrypted `inbuf`
         /// * Error
         ///     * [SvsmReqError]
         fn decrypt(
-            iv: &[u8; IV_SIZE],
-            key: &[u8; KEY_SIZE],
+            iv: &[u8],
+            key: &[u8],
             aad: &[u8],
             inbuf: &[u8],
-            outbuf: &mut [u8],
-        ) -> Result<usize, SvsmReqError>;
+        ) -> Result<Vec<u8>, SvsmReqError>;
     }
 
     /// Aes256Gcm type

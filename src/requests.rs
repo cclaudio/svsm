@@ -12,7 +12,7 @@ use crate::protocols::core::core_protocol_request;
 use crate::protocols::errors::{SvsmReqError, SvsmResultCode};
 #[cfg(any(not(test), rust_analyzer))]
 use crate::protocols::{vtpm::vtpm_protocol_request, SVSM_VTPM_PROTOCOL};
-use crate::protocols::{RequestParams, SVSM_CORE_PROTOCOL};
+use crate::protocols::{attestation::attestation_protocol_request, RequestParams, SVSM_CORE_PROTOCOL, SVSM_ATTESTATION_PROTOCOL};
 use crate::sev::vmsa::GuestVMExit;
 use crate::types::GUEST_VMPL;
 use crate::utils::halt;
@@ -68,6 +68,7 @@ fn request_loop_once(
 
     match protocol {
         SVSM_CORE_PROTOCOL => core_protocol_request(request, params).map(|_| true),
+        SVSM_ATTESTATION_PROTOCOL => attestation_protocol_request(request, params).map(|_| true),
         #[cfg(any(not(test), rust_analyzer))]
         SVSM_VTPM_PROTOCOL => vtpm_protocol_request(request, params).map(|_| true),
         _ => Err(SvsmReqError::unsupported_protocol()),

@@ -62,6 +62,10 @@ impl Uuid {
     pub const fn new() -> Self {
         Uuid { data: [0; 16] }
     }
+
+    pub fn is_zeroed(&self) -> bool {
+        self.data.iter().all(|x| *x == 0)
+    }
 }
 
 impl TryFrom<&[u8]> for Uuid {

@@ -2,18 +2,22 @@
 /*
  * Copyright (C) 2023 IBM Corporation
  *
- * Authors: Dov Murik <dovmurik@linux.ibm.com>
+ * Authors: Claudio Carvalho <cclaudio@linux.ibm.com>
+ *          Dov Murik <dovmurik@linux.ibm.com>
  */
+
+extern crate alloc;
 
 use crate::locking::SpinLock;
 
 use alloc::vec::Vec;
+use core::ptr::addr_of;
 use core::{mem::size_of, cell::OnceCell};
-use core::slice;
-use uuid::{uuid, Uuid};
+use core::slice::from_raw_parts;
+use core::str::FromStr;
 use crate::fw_meta::Uuid;
 
-const SERVICES_MANIFEST_HEADER_UUID: Uuid = Uuid::from("63849ebb-3d92-4670-a1ff-58f9c94b87bb");
+const SERVICES_MANIFEST_GUID: &str = "63849ebb-3d92-4670-a1ff-58f9c94b87bb";
 
 /// Global registry of services
 static SERVICES: SpinLock<OnceCell<Services>> = SpinLock::new(OnceCell::new());
@@ -28,8 +32,9 @@ struct ManifestHeader {
 }
 
 impl ManifestHeader {
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self as *const Self as *const u8, size_of::<Self>()) }
+    pub fn as_slice(&self) -> &[u8] {
+        let ptr: *const u8 = addr_of!(self).cast::<u8>();
+        unsafe { from_raw_parts(ptr, size_of::<Self>()) }
     }
 }
 
@@ -43,8 +48,9 @@ struct ServiceEntry {
 }
 
 impl ServiceEntry {
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self as *const Self as *const u8, size_of::<Self>()) }
+    pub fn as_slice(&self) -> &[u8] {
+        let ptr: *const u8 = addr_of!(self).cast::<u8>();
+        unsafe { from_raw_parts(ptr, size_of::<Self>()) }
     }
 }
 
@@ -53,25 +59,25 @@ struct Service {
     data: Vec<u8>,
 }
 
-pub struct Services {
+struct Services {
     data_size: usize,
     list: Vec<Service>,
 }
 
 impl Services {
     pub const fn new() -> Self {
-        Services { list: Vec::new() , data_size: 0 }
+        Services { list: Vec::<Service>::new() , data_size: 0 }
     }
 
     /// Register a new service. If the service is already registered, an empty error
     /// is returned.
-    pub fn register(&mut self, guid: Uuid, data: &[u8]) -> Result<(), ()> {
-        if self.get_service(&guid).is_some() {
+    pub fn register(&mut self, guid: &Uuid, data: &[u8]) -> Result<(), ()> {
+        if self.get_service(guid).is_some() {
             return Err(());
         }
         self.data_size += data.len();
         self.list.push(Service {
-            guid,
+            guid: *guid,
             data: data.to_vec(),
         });
         Ok(())
@@ -101,24 +107,27 @@ impl Services {
             data_size: service.data.len() as u32,
         };
 
-        let service_entries: Vec<u8> = Vec::with_capacity(size_of::<ServiceEntry>());
-        service_entries.extend_from_slice(service_entry.as_bytes());
+        let mut service_entries = Vec::<u8>::with_capacity(size_of::<ServiceEntry>());
+        service_entries.extend_from_slice(service_entry.as_slice());
 
-        let data_entries: Vec<u8> = Vec::with_capacity(service.data.len());
+        let mut data_entries = Vec::<u8>::with_capacity(service.data.len());
         data_entries.extend_from_slice(&service.data);
 
         let manifest_size: usize = size_of::<ManifestHeader>()
             + service_entries.len()
             + data_entries.len();
 
+        let manifest_guid = Uuid::from_str(SERVICES_MANIFEST_GUID)
+            .expect("Failed to convert the Service Manifest GUID");
+
         let manifest_header = ManifestHeader {
-            guid: SERVICES_MANIFEST_HEADER_UUID,
+            guid: manifest_guid,
             size: manifest_size as u32,
             num_services: 1,
         };
 
-        let manifest = Vec<u8>::with_capacity(manifest_size);
-        manifest.extend_from_slice(manifest_header.as_bytes());
+        let mut manifest = Vec::<u8>::with_capacity(manifest_size);
+        manifest.extend_from_slice(manifest_header.as_slice());
         manifest.extend_from_slice(&service_entries);
         manifest.extend_from_slice(&data_entries);
         Some(manifest)
@@ -129,96 +138,101 @@ impl Services {
         let services_entries_size: usize = size_of::<ServiceEntry>() * self.list.len();
         let start_data_offset: usize = size_of::<ManifestHeader>() + services_entries_size;
 
-        let service_entries: Vec<u8> = Vec::with_capacity(services_entries_size);
-        let data_entries: Vec<u8> = Vec::with_capacity(self.data_size);
+        let mut service_entries = Vec::<u8>::with_capacity(services_entries_size);
+        let mut data_entries = Vec::<u8>::with_capacity(self.data_size);
 
         for service in self.list.iter() {
             let service_entry = ServiceEntry {
                 guid: service.guid,
-                data_offset: (start_data_offset + data.len()) as u32,
+                data_offset: (start_data_offset + data_entries.len()) as u32,
                 data_size: service.data.len() as u32,
             };
-            service_entries.extend_from_slice(service_entry.as_bytes());
-            data_entries.extend_from_slice(&service.data);
+            service_entries.extend_from_slice(service_entry.as_slice());
+            data_entries.extend_from_slice(service.data.as_slice());
         }
 
         let manifest_size: usize = size_of::<ManifestHeader>()
             + service_entries.len()
             + data_entries.len();
 
+        let manifest_guid = Uuid::from_str(SERVICES_MANIFEST_GUID)
+            .expect("Failed to convert the Service Manifest GUID");
+        
         let manifest_header = ManifestHeader {
-            guid: SERVICES_MANIFEST_HEADER_UUID,
+            guid: manifest_guid,
             size: manifest_size as u32,
             num_services: service_entries.len() as u32,
         };
 
-        let manifest = Vec<u8>::with_capacity(manifest_size);
-        manifest.extend_from_slice(manifest_header.as_bytes());
+        let mut manifest = Vec::<u8>::with_capacity(manifest_size);
+        manifest.extend_from_slice(manifest_header.as_slice());
         manifest.extend_from_slice(&service_entries);
         manifest.extend_from_slice(&data_entries);
         manifest
     }
 
-    /// Serialize the services manifest.  Set `single_service_guid` to `None` to
-    /// include all services in the manifest, or to `Some(guid)` to include only
-    /// a single service.
-    pub fn build_manifest(
-        &self,
-        single_service_guid: Option<Uuid>,
-        _manifest_version: Option<u32>,
-    ) -> Vec<u8> {
-        let data_start_offset: usize = size_of::<ManifestHeader>()
-        data_start_offset += 
-            + (size_of::<ServiceEntry>() as usize * self.list.len());
+    // /// Serialize the services manifest.  Set `single_service_guid` to `None` to
+    // /// include all services in the manifest, or to `Some(guid)` to include only
+    // /// a single service.
+    // pub fn build_manifest(
+    //     &self,
+    //     single_service_guid: Option<Uuid>,
+    //     _manifest_version: Option<u32>,
+    // ) -> Vec<u8> {
+    //     let data_start_offset: usize = size_of::<ManifestHeader>()
+    //     data_start_offset += 
+    //         + (size_of::<ServiceEntry>() as usize * self.list.len());
 
-        let mut service_entries: Vec<u8> = Vec::new();
-        let mut data: Vec<u8> = Vec::new();
+    //     let mut service_entries: Vec<u8> = Vec::new();
+    //     let mut data: Vec<u8> = Vec::new();
 
-        for service in &self.list {
-            if let Some(filter_guid) = single_service_guid {
-                if service.guid != filter_guid {
-                    continue;
-                }
-            }
-            let entry: ServiceEntry = ServiceEntry {
-                guid: service.guid.to_bytes_le(),
-                data_offset: (data_start_offset + data.len()) as u32,
-                data_size: service.data.len() as u32,
-            };
-            service_entries.extend_from_slice(entry.as_bytes());
-            data.extend_from_slice(&service.data);
-        }
+    //     for service in &self.list {
+    //         if let Some(filter_guid) = single_service_guid {
+    //             if service.guid != filter_guid {
+    //                 continue;
+    //             }
+    //         }
+    //         let entry: ServiceEntry = ServiceEntry {
+    //             guid: service.guid.to_bytes_le(),
+    //             data_offset: (data_start_offset + data.len()) as u32,
+    //             data_size: service.data.len() as u32,
+    //         };
+    //         service_entries.extend_from_slice(entry.as_bytes());
+    //         data.extend_from_slice(&service.data);
+    //     }
 
-        let total_size: usize =
-            size_of::<ManifestHeader>() as usize + service_entries.len() + data.len();
-        let header: ManifestHeader = ManifestHeader {
-            guid: SERVICES_MANIFEST_HEADER_UUID.to_bytes_le(),
-            size: total_size as u32,
-            num_services: self.list.len() as u32,
-        };
-        let mut res: Vec<u8> = Vec::with_capacity(total_size);
-        res.extend_from_slice(header.as_bytes());
-        res.extend_from_slice(&service_entries);
-        res.extend_from_slice(&data);
-        res
-    }
+    //     let total_size: usize =
+    //         size_of::<ManifestHeader>() as usize + service_entries.len() + data.len();
+    //     let header: ManifestHeader = ManifestHeader {
+    //         guid: SERVICES_MANIFEST_HEADER_UUID.to_bytes_le(),
+    //         size: total_size as u32,
+    //         num_services: self.list.len() as u32,
+    //     };
+    //     let mut res: Vec<u8> = Vec::with_capacity(total_size);
+    //     res.extend_from_slice(header.as_bytes());
+    //     res.extend_from_slice(&service_entries);
+    //     res.extend_from_slice(&data);
+    //     res
+    // }
 }
 
-pub fn svsm_services_init() {
-    let lock = SERVICES.lock();
-    let services = lock.get_or_init(|| Services::new());
+pub fn protocols_init_services() {
+    let _ = SERVICES.lock().get_or_init(|| Services::new());
 
-    // TODO: call services registration here to ensure they will be registered
-    // always in the same order
-    services.register(guid, data)
+    // vTPM init
+    //vtpm_init();
 }
 
-pub fn build_manifest_one(guid: &uuid) -> Option<Vec<u8>> {
-    
+pub fn protocols_register_service(guid: &Uuid, data: &[u8]) -> Result<(), ()> {
+    SERVICES.lock().get_mut().unwrap().register(guid, data)
 }
 
-pub fn build_services_manifest(service_guid: Option<Uuid>, manifest_version: Option<u32>) -> Vec<u8> {
-    SERVICES.lock().get_manifest(service_guid, manifest_version)
+pub fn build_service_manifest_one(guid: &Uuid) -> Option<Vec<u8>> {
+    SERVICES.lock().get().unwrap().build_manifest_one(guid)
+}
+
+pub fn build_service_manifest_all() -> Vec<u8> {
+    SERVICES.lock().get().unwrap().build_manifest_all()
 }
 
 #[cfg(test)]

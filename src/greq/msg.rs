@@ -10,7 +10,7 @@ extern crate alloc;
 
 use alloc::{
     alloc::{alloc_zeroed, Layout},
-    boxed::Box,
+    boxed::Box, vec::Vec,
 };
 use core::{
     mem::size_of,
@@ -25,7 +25,7 @@ use crate::{
     mm::virt_to_phys,
     protocols::errors::SvsmReqError,
     sev::{ghcb::PageStateChangeOp, secrets_page::VMPCK_SIZE},
-    types::{PageSize, PAGE_SIZE},
+    types::{PageSize, PAGE_SIZE}, fw_meta::Uuid,
 };
 
 /// Version of the message header
@@ -275,6 +275,19 @@ impl SnpGuestRequestMsg {
             .map_err(|_| SvsmReqError::invalid_request())
     }
 
+    pub fn set_payload(&mut self, payload: &[u8]) -> Result<(), SvsmReqError> {
+        self.pld.fill(0);
+        self.pld
+            .get_mut(..payload.len())
+            .ok_or_else(SvsmReqError::invalid_request)?
+            .copy_from_slice(payload);
+        Ok(())
+    }
+
+    pub fn set_hdr(&mut self, hdr: &SnpGuestRequestMsgHdr) {
+        self.hdr = *hdr;
+    }
+
     /// Fill the [`SnpGuestRequestMsg`] fields with zeros
     pub fn clear(&mut self) {
         self.hdr.as_slice_mut().fill(0);
@@ -316,28 +329,27 @@ impl SnpGuestRequestMsg {
 
         let mut msg_hdr = SnpGuestRequestMsgHdr::new(payload_size_u16, msg_type, msg_seqno);
         let aad: &[u8] = msg_hdr.get_aad_slice();
-        let iv: [u8; IV_SIZE] = build_iv(msg_seqno);
+        let iv: Vec<u8> = build_iv(msg_seqno);
 
-        self.pld.fill(0);
+        // Encrypt the provided command and return the ciphertext+authtag in a vector
+        let buffer: Vec<u8> = Aes256Gcm::encrypt(iv.as_slice(), vmpck0, aad, command)?;
 
-        // Encrypt the provided command and store the result in the message payload
-        let authtag_end: usize = Aes256Gcm::encrypt(&iv, vmpck0, aad, command, &mut self.pld)?;
-
-        // In the Aes256Gcm encrypt API, the authtag is postfixed (comes after the encrypted payload)
-        let ciphertext_end: usize = authtag_end - AUTHTAG_SIZE;
-        let authtag = self
-            .pld
-            .get_mut(ciphertext_end..authtag_end)
+        let ciphertext_end: usize = buffer
+            .len()
+            .checked_sub(AUTHTAG_SIZE)
             .ok_or_else(SvsmReqError::invalid_request)?;
 
         // The command should have the same size when encrypted and decrypted
-        assert_eq!(command.len(), ciphertext_end);
+        if ciphertext_end != command.len() {
+            return Err(SvsmReqError::invalid_request());
+        }
 
-        // Move the authtag to the message header
+        let (ciphertext, authtag) = buffer.split_at(ciphertext_end);
+
         msg_hdr.set_authtag(authtag)?;
-        authtag.fill(0);
 
-        self.hdr = msg_hdr;
+        self.set_payload(ciphertext)?;
+        self.set_hdr(&msg_hdr);
 
         Ok(())
     }
@@ -354,12 +366,11 @@ impl SnpGuestRequestMsg {
     /// * `msg_type`: Type of the command stored in the message payload
     /// * `msg_seqno`: VMPL0 sequence number that was used in the message.
     /// * `vmpck0`: VMPCK0 key, it will be used to decrypt the message
-    /// * `outbuf`: buffer that will be used to store the decrypted message payload
     ///
     /// # Returns
     ///
     /// * Success
-    ///     * usize: Number of bytes written to `outbuf`
+    ///     * Vec<u8>: Decrypted [`SnpGuestRequestMsg`] pld
     /// * Error
     ///     * [`SvsmReqError`]
     pub fn decrypt_get(
@@ -367,48 +378,34 @@ impl SnpGuestRequestMsg {
         msg_type: SnpGuestRequestMsgType,
         msg_seqno: u64,
         vmpck0: &[u8; VMPCK_SIZE],
-        outbuf: &mut [u8],
-    ) -> Result<usize, SvsmReqError> {
+    ) -> Result<Vec<u8>, SvsmReqError> {
         self.hdr.validate(msg_type, msg_seqno)?;
 
-        let iv: [u8; IV_SIZE] = build_iv(msg_seqno);
+        let iv: Vec<u8> = build_iv(msg_seqno);
         let aad: &[u8] = self.hdr.get_aad_slice();
 
-        // In the Aes256Gcm decrypt API, the authtag must be provided postfix in the inbuf
-        let ciphertext_end = usize::from(self.hdr.msg_sz);
-        let tag_end: usize = ciphertext_end + AUTHTAG_SIZE;
+        let ciphertext_len = usize::from(self.hdr.msg_sz);
+        let ciphertext = self.pld
+            .get(..ciphertext_len)
+            .ok_or_else(SvsmReqError::invalid_request)?;
 
-        // The message payload must be large enough to hold the ciphertext and
-        // the authentication tag.
-        let hdr_tag = self
-            .hdr
+        let authtag = self.hdr
             .authtag
             .get(..AUTHTAG_SIZE)
             .ok_or_else(SvsmReqError::invalid_request)?;
-        let pld_tag = self
-            .pld
-            .get_mut(ciphertext_end..tag_end)
-            .ok_or_else(SvsmReqError::invalid_request)?;
-        pld_tag.copy_from_slice(hdr_tag);
 
-        // Payload with postfixed authtag
-        let inbuf = self
-            .pld
-            .get(..tag_end)
-            .ok_or_else(SvsmReqError::invalid_request)?;
+        let postfix = Vec::<u8>::with_capacity(ciphertext_len + AUTHTAG_SIZE);
+        postfix.extend_from_slice(ciphertext);
+        postfix.extend_from_slice(authtag);
 
-        let outbuf_len: usize = Aes256Gcm::decrypt(&iv, vmpck0, aad, inbuf, outbuf)?;
-
-        Ok(outbuf_len)
+        Aes256Gcm::decrypt(iv.as_slice(), vmpck0, aad, postfix.as_slice())
     }
 }
 
 /// Build the initialization vector for AES-256 GCM
-fn build_iv(msg_seqno: u64) -> [u8; IV_SIZE] {
-    const U64_SIZE: usize = size_of::<u64>();
-    let mut iv = [0u8; IV_SIZE];
-
-    iv[..U64_SIZE].copy_from_slice(&msg_seqno.to_ne_bytes());
+fn build_iv(msg_seqno: u64) -> Vec<u8> {
+    let mut iv = Vec::<u8>::with_capacity(size_of::<u64>());
+    iv.copy_from_slice(&msg_seqno.to_ne_bytes());
     iv
 }
 
@@ -473,6 +470,22 @@ pub struct SnpGuestRequestExtData {
     data: [u8; SNP_GUEST_REQ_MAX_DATA_SIZE],
 }
 
+/// The certificates returned in [`SnpGuestRequestExtData`] data are identified by
+/// a table of [`CertTableEntry`] where:
+///    - the table is terminated with an entry containing all zeros for the GUID,
+///      offset and length
+///    - Certificate data starts just after the table
+#[repr(C, packed)]
+struct CertTableEntry {
+    /// GUID of the Certificate
+    guid: Uuid,
+    /// Offset from the [`SnpGuestRequestExtData`] data to where the certificate
+    /// data starts
+    offset: u32,
+    /// Length of the certificate data
+    length: u32,
+}
+
 impl SnpGuestRequestExtData {
     /// Allocate the object in the heap without going through stack as
     /// this is a large object
@@ -487,6 +500,51 @@ impl SnpGuestRequestExtData {
 
             let ptr = addr.cast::<Self>();
             Ok(Box::from_raw(ptr))
+        }
+    }
+
+    pub fn len(&self) -> Option<usize> {
+        const TABLE_ENTRY_SIZE: usize = size_of::<CertTableEntry>();
+
+        let start = VirtAddr::from(self.data.as_ptr());
+        let end = start + SNP_GUEST_REQ_MAX_DATA_SIZE;
+
+        let mut max_len: usize = 0;
+        
+        for vaddr in (start.bits()..end.bits())
+            .step_by(TABLE_ENTRY_SIZE)
+            .map(VirtAddr::from)
+        {
+            let entry = unsafe { &*vaddr.as_ptr::<CertTableEntry>() };
+
+            let current_len: usize = (entry.offset + entry.length) as usize;
+            
+            if current_len > max_len {
+                max_len = current_len;
+            }
+
+            if entry.guid.is_zeroed() {
+                if max_len < SNP_GUEST_REQ_MAX_DATA_SIZE {
+                    return Some(max_len);
+                } else {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_certificates(&self) -> Option<Vec<u8>> {
+        let Some(len) = self.len() else {
+            return None;
+        };
+
+        if len == 0 {
+            Some(Vec::<u8>::new())
+        } else {
+            let mut certs = Vec::<u8>::with_capacity(len);
+            certs.extend_from_slice(&self.data[..len]);
+            Some(certs)
         }
     }
 

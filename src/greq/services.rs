@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+
 use crate::{
     greq::{
         driver::{send_extended_guest_request, send_regular_guest_request},
@@ -16,40 +18,6 @@ use crate::{
     },
     protocols::errors::SvsmReqError,
 };
-use core::mem::size_of;
-
-const REPORT_REQUEST_SIZE: usize = size_of::<SnpReportRequest>();
-const REPORT_RESPONSE_SIZE: usize = size_of::<SnpReportResponse>();
-
-fn get_report(buffer: &mut [u8], certs: Option<&mut [u8]>) -> Result<usize, SvsmReqError> {
-    let request: &SnpReportRequest = SnpReportRequest::try_from_as_ref(buffer)?;
-    // Non-VMPL0 attestation reports can be requested by the guest kernel
-    // directly to the PSP.
-    if !request.is_vmpl0() {
-        return Err(SvsmReqError::invalid_parameter());
-    }
-    let response_len = if certs.is_none() {
-        send_regular_guest_request(
-            SnpGuestRequestMsgType::ReportRequest,
-            buffer,
-            REPORT_REQUEST_SIZE,
-        )?
-    } else {
-        send_extended_guest_request(
-            SnpGuestRequestMsgType::ReportRequest,
-            buffer,
-            REPORT_REQUEST_SIZE,
-            certs.unwrap(),
-        )?
-    };
-    if REPORT_RESPONSE_SIZE > response_len {
-        return Err(SvsmReqError::invalid_request());
-    }
-    let response: &SnpReportResponse = SnpReportResponse::try_from_as_ref(buffer)?;
-    response.validate()?;
-
-    Ok(response_len)
-}
 
 /// Request a regular VMPL0 attestation report to the PSP.
 ///
@@ -61,7 +29,7 @@ fn get_report(buffer: &mut [u8], certs: Option<&mut [u8]>) -> Result<usize, Svsm
 ///
 /// # Arguments
 ///
-/// * `buffer`: Buffer with the [`MSG_REPORT_REQ`](SnpReportRequest) command that will be
+/// * `report_data`: Buffer with the [`MSG_REPORT_REQ`](SnpReportRequest) command that will be
 ///             sent to the PSP. It must be large enough to hold the
 ///             [`MSG_REPORT_RESP`](SnpReportResponse) received from the PSP.
 ///
@@ -72,8 +40,19 @@ fn get_report(buffer: &mut [u8], certs: Option<&mut [u8]>) -> Result<usize, Svsm
 ///        [`MSG_REPORT_RESP`](SnpReportResponse) size.
 /// * Error
 ///     * [`SvsmReqError`]
-pub fn get_regular_report(buffer: &mut [u8]) -> Result<usize, SvsmReqError> {
-    get_report(buffer, None)
+pub fn get_regular_report(report_data: Vec<u8>) -> Result<Vec<u8>, SvsmReqError> {
+    let mut request = SnpReportRequest::new();
+    request.set_report_data(report_data)?;
+
+    let response_vec = send_regular_guest_request(
+        SnpGuestRequestMsgType::ReportRequest,
+        request.as_slice(),
+    )?;
+
+    let response: &SnpReportResponse = SnpReportResponse::try_from_as_ref(response_vec.as_slice())?;
+    let report_vec: Vec<u8> = response.get_report_vec()?;
+
+    Ok(report_vec)
 }
 
 /// Request an extended VMPL0 attestation report to the PSP.
@@ -87,10 +66,9 @@ pub fn get_regular_report(buffer: &mut [u8]) -> Result<usize, SvsmReqError> {
 ///
 /// # Arguments
 ///
-/// * `buffer`: Buffer with the [`MSG_REPORT_REQ`](SnpReportRequest) command that will be
+/// * `report_data`: Buffer with the [`MSG_REPORT_REQ`](SnpReportRequest) command that will be
 ///             sent to the PSP. It must be large enough to hold the
 ///             [`MSG_REPORT_RESP`](SnpReportResponse) received from the PSP.
-/// * `certs`:  Buffer to store the SEV-SNP certificates received from the hypervisor.
 ///
 /// # Return codes
 ///
@@ -103,6 +81,17 @@ pub fn get_regular_report(buffer: &mut [u8]) -> Result<usize, SvsmReqError> {
 ///         * `certs` is not large enough to hold the certificates.
 ///             * `certs_buffer_size`: number of bytes required.
 ///             * `psp_rc`: PSP return code
-pub fn get_extended_report(buffer: &mut [u8], certs: &mut [u8]) -> Result<usize, SvsmReqError> {
-    get_report(buffer, Some(certs))
+pub fn get_extended_report(report_data: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), SvsmReqError> {
+    let mut request = SnpReportRequest::new();
+    request.set_report_data(report_data)?;
+
+    let (response_vec, certs) = send_extended_guest_request(
+        SnpGuestRequestMsgType::ReportRequest,
+        request.as_slice(),
+    )?;
+
+    let response: &SnpReportResponse = SnpReportResponse::try_from_as_ref(response_vec.as_slice())?;
+    let report_vec: Vec<u8> = response.get_report_vec()?;
+
+    Ok((report_vec, certs))
 }

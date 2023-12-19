@@ -8,12 +8,29 @@
 
 extern crate alloc;
 
-use core::mem::size_of;
+use core::{mem::size_of, slice::from_raw_parts, ptr::{addr_of, copy_nonoverlapping}};
+
+use alloc::vec::Vec;
 
 use crate::protocols::errors::SvsmReqError;
 
 /// Size of the `SnpReportRequest.user_data`
-pub const USER_DATA_SIZE: usize = 64;
+pub const REPORT_DATA_SIZE: usize = 64;
+
+/// Selects which key to be used for derivation
+/// # Layout
+/// 31:2 - Reserved
+///  1:0 - KEY_SEL. Selects which key to use for derivation
+///        0: If VLEK is installed, sign with VLEK. Otherwise, sign with VCEK
+///        1: Sign with VCEK
+///        2: Sign with VLEK
+///        3: Reserved
+#[repr(u32)]
+enum ReportKeySelection {
+    VlekOtherwiseVcek = 0,
+    Vcek = 1,
+    Vlek = 2,
+}
 
 /// MSG_REPORT_REQ payload format (AMD SEV-SNP spec. table 20)
 #[repr(C, packed)]
@@ -21,47 +38,73 @@ pub const USER_DATA_SIZE: usize = 64;
 pub struct SnpReportRequest {
     /// Guest-provided data to be included in the attestation report
     /// REPORT_DATA (512 bits)
-    user_data: [u8; USER_DATA_SIZE],
+    report_data: [u8; REPORT_DATA_SIZE],
     /// The VMPL to put in the attestation report
     vmpl: u32,
-    /// 31:2 - Reserved
-    ///  1:0 - KEY_SEL. Selects which key to use for derivation
-    ///        0: If VLEK is installed, sign with VLEK. Otherwise, sign with VCEK
-    ///        1: Sign with VCEK
-    ///        2: Sign with VLEK
-    ///        3: Reserved
+    /// Key selection, including reserved bits
     flags: u32,
     /// Reserved, must be zero
     rsvd: [u8; 24],
 }
 
-impl SnpReportRequest {
-    /// Take a slice and return a reference for Self
-    pub fn try_from_as_ref(buffer: &[u8]) -> Result<&Self, SvsmReqError> {
-        let buffer = buffer
-            .get(..size_of::<Self>())
-            .ok_or_else(SvsmReqError::invalid_parameter)?;
-
-        // SAFETY: SnpReportRequest has no invalid representations, as it is
-        // comprised entirely of integer types. It is repr(packed), so its
-        // required alignment is simply 1. We have checked the size, so this
-        // is entirely safe.
-        let request = unsafe { &*buffer.as_ptr().cast::<Self>() };
-
-        if !request.is_reserved_clear() {
-            return Err(SvsmReqError::invalid_parameter());
+impl Default for SnpReportRequest {
+    fn default() -> Self {
+        Self {
+            report_data: [0; REPORT_DATA_SIZE],
+            ..Default::default()
         }
-        Ok(request)
+    }
+}
+
+impl SnpReportRequest {
+    /// Create a new SnpGuestRequest. It 
+    pub fn new() -> Self {
+        Self {
+            vmpl: 0,
+            flags: ReportKeySelection::VlekOtherwiseVcek as u32,
+            ..Default::default()
+        }
     }
 
-    pub fn is_vmpl0(&self) -> bool {
-        self.vmpl == 0
+    pub fn set_report_data(&mut self, report_data: Vec<u8>) -> Result<(), SvsmReqError> {
+        self.report_data
+            .get_mut(..report_data.len())
+            .ok_or_else(|| SvsmReqError::invalid_parameter())?
+            .copy_from_slice(report_data.as_slice());
+        Ok(())
     }
 
-    /// Check if the reserved field is clear
-    fn is_reserved_clear(&self) -> bool {
-        self.rsvd.into_iter().all(|e| e == 0)
+    pub fn as_slice(&self) -> &[u8] {
+        let ptr: *const u8 = addr_of!(self).cast::<u8>();
+        unsafe { from_raw_parts(ptr, size_of::<Self>()) }
     }
+
+    // /// Take a slice and return a reference for Self
+    // pub fn try_from_as_ref(buffer: &[u8]) -> Result<&Self, SvsmReqError> {
+    //     let buffer = buffer
+    //         .get(..size_of::<Self>())
+    //         .ok_or_else(SvsmReqError::invalid_parameter)?;
+
+    //     // SAFETY: SnpReportRequest has no invalid representations, as it is
+    //     // comprised entirely of integer types. It is repr(packed), so its
+    //     // required alignment is simply 1. We have checked the size, so this
+    //     // is entirely safe.
+    //     let request = unsafe { &*buffer.as_ptr().cast::<Self>() };
+
+    //     if !request.is_reserved_clear() {
+    //         return Err(SvsmReqError::invalid_parameter());
+    //     }
+    //     Ok(request)
+    // }
+
+    // pub fn is_vmpl0(&self) -> bool {
+    //     self.vmpl == 0
+    // }
+
+    // /// Check if the reserved field is clear
+    // fn is_reserved_clear(&self) -> bool {
+    //     self.rsvd.into_iter().all(|e| e == 0)
+    // }
 }
 
 ///  MSG_REPORT_RSP payload format (AMD SEV-SNP spec. table 23)
@@ -102,7 +145,7 @@ impl SnpReportResponse {
     }
 
     /// Validate the [SnpReportResponse] fields
-    pub fn validate(&self) -> Result<(), SvsmReqError> {
+    fn validate(&self) -> Result<(), SvsmReqError> {
         if self.status != SnpReportResponseStatus::Success as u32 {
             return Err(SvsmReqError::invalid_request());
         }
@@ -112,6 +155,20 @@ impl SnpReportResponse {
         }
 
         Ok(())
+    }
+
+    pub fn get_report_vec(&self) -> Result<Vec<u8>, SvsmReqError> {
+        self.validate()?;
+
+        let report_size = self.report_size as usize;
+        let mut report = Vec::<u8>::with_capacity(report_size);
+
+        unsafe {
+            copy_nonoverlapping(addr_of!(self.report).cast::<u8>(), report.as_mut_ptr(), report_size);
+            report.set_len(report_size);
+        }
+        
+        Ok(report)
     }
 }
 
@@ -202,7 +259,7 @@ mod tests {
     #[test]
     #[cfg_attr(test_in_svsm, ignore = "offset_of")]
     fn test_snp_report_request_offsets() {
-        assert_eq!(offset_of!(SnpReportRequest, user_data), 0x0);
+        assert_eq!(offset_of!(SnpReportRequest, report_data), 0x0);
         assert_eq!(offset_of!(SnpReportRequest, vmpl), 0x40);
         assert_eq!(offset_of!(SnpReportRequest, flags), 0x44);
         assert_eq!(offset_of!(SnpReportRequest, rsvd), 0x48);
