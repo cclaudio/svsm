@@ -109,7 +109,7 @@ $(OPENSSL_MAKEFILE):
 			disable-legacy \
 			no-sse2 \
 			no-asm \
-			--with-rand-seed=none \
+			--with-rand-seed=getrandom \
 			-I$(LIBCRT_DIR)/include \
 			-Wl,rpath=$(LIBCRT_DIR) -lcrt -g -O0)
 
@@ -121,7 +121,7 @@ $(LIBPLATFORM): $(MSTPM_MAKEFILE) $(LIBCRYPTO)
 	$(MAKE) -C $(MSTPM_DIR) $(LIBPLATFORM_A)
 
 MSTPM_CFLAGS := -static -nostdinc -fno-stack-protector -fPIE
-MSTPM_CFLAGS += -DSIMULATION=NO -DEPHEMERAL_NV -DVTPM -DHASH_LIB=Ossl -DSYM_LIB=Ossl -DMATH_LIB=Ossl -DSELF_TEST=NO
+MSTPM_CFLAGS += -DSIMULATION=NO -DEPHEMERAL_NV -DVTPM -DHASH_LIB=Ossl -DSYM_LIB=Ossl -DMATH_LIB=Ossl
 MSTPM_CFLAGS += -I$(LIBCRT_DIR)/include
 MSTPM_CFLAGS += -I$(OPENSSL_DIR)/include
 

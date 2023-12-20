@@ -158,3 +158,10 @@ int usleep(unsigned usec)
     NOT_IMPLEMENTED;
     return -1;
 }
+
+long syscall(long number, ...)
+{
+    NOT_IMPLEMENTED;
+    errno = ENOSYS;
+    return -1;
+}

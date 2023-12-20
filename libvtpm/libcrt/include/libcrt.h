@@ -20,7 +20,6 @@
 
 #define _Noreturn __attribute__((__noreturn__))
 
-#define weak __attribute__((__weak__))
 #define hidden __attribute__((__visibility__("hidden")))
 #define weak_alias(old, new) \
         extern __typeof(old) new __attribute__((__weak__, __alias__(#old)))
@@ -73,8 +72,10 @@
 // errno.h
 
 extern int errno;
+#define EINTR         4
 #define ENOMEM        12
 #define EINVAL        22
+#define ENOSYS        38
 #define EAFNOSUPPORT  47
 #define EOVERFLOW     75
 

@@ -50,9 +50,9 @@ impl TpmEndorsementKey {
         // TODO: Replace the rsa2048 key by the ecc-p256 when the TPM_RC_NO_RESULT (0x154) is fixed.
         // This is likely to be related to the ECC issue we are having in the TPM Selftests, which we
         // workaround by setting "-DSELF_TEST=NO"
-        let mut create_out: Box<CreatePrimary_Out> =
-            vtpm_create_primary_rsa2048(authpolicy.as_slice(), attributes)?;
-        // let mut create_out: Box<CreatePrimary_Out> = super::cmds::vtpm_create_primary_ecc_p256(authpolicy.as_slice(), attributes)?;
+        //let mut create_out: Box<CreatePrimary_Out> =
+        //    vtpm_create_primary_rsa2048(authpolicy.as_slice(), attributes)?;
+        let mut create_out: Box<CreatePrimary_Out> = super::cmds::vtpm_create_primary_ecc_p256(authpolicy.as_slice(), attributes)?;
 
         // EK template is well known, see the TCG EK Credential Profile specification.
         // With the same Endorsement Primary Seed (EPS), the same EK can be regenerated
