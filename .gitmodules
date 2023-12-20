@@ -4,4 +4,4 @@
 [submodule "libvtpm/ms-tpm-20-ref"]
 	path = libvtpm/ms-tpm-20-ref
 	url = https://github.com/svsm-vtpm/ms-tpm-20-ref.git
-	branch = svsm-vtpm-ossl-preview
+	branch = svsm-vtpm-ossl3-preview

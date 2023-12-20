@@ -150,3 +150,11 @@ int stat(const char *__restrict path, struct stat *restrict buf)
     NOT_IMPLEMENTED;
     return -1;
 }
+
+// unistd.h
+
+int usleep(unsigned usec)
+{
+    NOT_IMPLEMENTED;
+    return -1;
+}

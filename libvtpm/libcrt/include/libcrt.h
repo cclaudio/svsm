@@ -146,6 +146,7 @@ uid_t geteuid(void);
 gid_t getgid(void);
 gid_t getegid(void);
 int issetugid(void);
+int usleep(unsigned usec);
 
 // stdio.h
 
