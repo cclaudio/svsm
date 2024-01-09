@@ -31,3 +31,14 @@ int rand(void)
 
   return r;
 }
+
+int getentropy(void *buffer, size_t length)
+{
+  char *b = buffer;
+  int i;
+
+  for (i = 0; i < length; i++)
+      b[i] = rand();
+
+  return 0;
+}
