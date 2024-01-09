@@ -14,18 +14,18 @@ use alloc::{
 };
 use core::{
     mem::size_of,
-    ptr::{addr_of, addr_of_mut},
+    ptr::{addr_of, addr_of_mut, copy_nonoverlapping},
     slice::{from_raw_parts, from_raw_parts_mut, from_ref},
 };
 
 use crate::{
     address::{Address, VirtAddr},
     cpu::percpu::this_cpu_mut,
-    crypto::aead::{Aes256Gcm, Aes256GcmTrait, AUTHTAG_SIZE, IV_SIZE},
+    crypto::aead::{Aes256Gcm, Aes256GcmTrait, AUTHTAG_SIZE},
     mm::virt_to_phys,
     protocols::errors::SvsmReqError,
     sev::{ghcb::PageStateChangeOp, secrets_page::VMPCK_SIZE},
-    types::{PageSize, PAGE_SIZE}, fw_meta::Uuid,
+    types::{PageSize, PAGE_SIZE}, utils::uuid::Uuid,
 };
 
 /// Version of the message header
@@ -74,7 +74,7 @@ pub const SNP_GUEST_REQ_MAX_DATA_SIZE: usize = 4 * PAGE_SIZE;
 
 /// `SNP_GUEST_REQUEST` message header format (AMD SEV-SNP spec. table 98)
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct SnpGuestRequestMsgHdr {
     /// Message authentication tag
     authtag: [u8; 32],
@@ -117,6 +117,12 @@ impl SnpGuestRequestMsgHdr {
             msg_sz,
             msg_vmpck: 0,
             ..Default::default()
+        }
+    }
+
+    pub fn copy_from(&mut self, src_hdr: &Self) {
+        unsafe {
+            copy_nonoverlapping(addr_of!(*src_hdr).cast::<u8>(), addr_of_mut!(*self).cast::<u8>(), size_of::<Self>());
         }
     }
 
@@ -197,7 +203,7 @@ impl Default for SnpGuestRequestMsgHdr {
 
 /// `SNP_GUEST_REQUEST` message format
 #[repr(C, align(4096))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct SnpGuestRequestMsg {
     hdr: SnpGuestRequestMsgHdr,
     pld: [u8; MSG_PAYLOAD_SIZE],
@@ -226,6 +232,12 @@ impl SnpGuestRequestMsg {
 
             let ptr = addr.cast::<Self>();
             Ok(Box::from_raw(ptr))
+        }
+    }
+
+    pub fn copy_from(&mut self, src_msg: &Self) {
+        unsafe {
+            copy_nonoverlapping(addr_of!(*src_msg).cast::<u8>(), addr_of_mut!(*self).cast::<u8>(), size_of::<Self>());
         }
     }
 
@@ -284,10 +296,6 @@ impl SnpGuestRequestMsg {
         Ok(())
     }
 
-    pub fn set_hdr(&mut self, hdr: &SnpGuestRequestMsgHdr) {
-        self.hdr = *hdr;
-    }
-
     /// Fill the [`SnpGuestRequestMsg`] fields with zeros
     pub fn clear(&mut self) {
         self.hdr.as_slice_mut().fill(0);
@@ -333,24 +341,18 @@ impl SnpGuestRequestMsg {
 
         // Encrypt the provided command and return the ciphertext+authtag in a vector
         let buffer: Vec<u8> = Aes256Gcm::encrypt(iv.as_slice(), vmpck0, aad, command)?;
-
         let ciphertext_end: usize = buffer
             .len()
             .checked_sub(AUTHTAG_SIZE)
             .ok_or_else(SvsmReqError::invalid_request)?;
-
         // The command should have the same size when encrypted and decrypted
         if ciphertext_end != command.len() {
             return Err(SvsmReqError::invalid_request());
         }
-
         let (ciphertext, authtag) = buffer.split_at(ciphertext_end);
-
         msg_hdr.set_authtag(authtag)?;
-
+        self.hdr.copy_from(&msg_hdr);
         self.set_payload(ciphertext)?;
-        self.set_hdr(&msg_hdr);
-
         Ok(())
     }
 
@@ -380,21 +382,17 @@ impl SnpGuestRequestMsg {
         vmpck0: &[u8; VMPCK_SIZE],
     ) -> Result<Vec<u8>, SvsmReqError> {
         self.hdr.validate(msg_type, msg_seqno)?;
-
         let iv: Vec<u8> = build_iv(msg_seqno);
         let aad: &[u8] = self.hdr.get_aad_slice();
-
         let ciphertext_len = usize::from(self.hdr.msg_sz);
         let ciphertext = self.pld
             .get(..ciphertext_len)
             .ok_or_else(SvsmReqError::invalid_request)?;
-
         let authtag = self.hdr
             .authtag
             .get(..AUTHTAG_SIZE)
             .ok_or_else(SvsmReqError::invalid_request)?;
-
-        let postfix = Vec::<u8>::with_capacity(ciphertext_len + AUTHTAG_SIZE);
+        let mut postfix = Vec::<u8>::with_capacity(ciphertext_len + AUTHTAG_SIZE);
         postfix.extend_from_slice(ciphertext);
         postfix.extend_from_slice(authtag);
 
@@ -402,10 +400,11 @@ impl SnpGuestRequestMsg {
     }
 }
 
-/// Build the initialization vector for AES-256 GCM
+/// Build the initialization vector for AES-256 GCM. The SVSM spec says it has to be 96-bits (12 bytes)
 fn build_iv(msg_seqno: u64) -> Vec<u8> {
     let mut iv = Vec::<u8>::with_capacity(size_of::<u64>());
-    iv.copy_from_slice(&msg_seqno.to_ne_bytes());
+    iv.extend_from_slice(&msg_seqno.to_ne_bytes());
+    iv.extend_from_slice(&[0; 4]);
     iv
 }
 
@@ -475,6 +474,7 @@ pub struct SnpGuestRequestExtData {
 ///    - the table is terminated with an entry containing all zeros for the GUID,
 ///      offset and length
 ///    - Certificate data starts just after the table
+#[derive(Debug)]
 #[repr(C, packed)]
 struct CertTableEntry {
     /// GUID of the Certificate
@@ -509,23 +509,24 @@ impl SnpGuestRequestExtData {
         let start = VirtAddr::from(self.data.as_ptr());
         let end = start + SNP_GUEST_REQ_MAX_DATA_SIZE;
 
-        let mut max_len: usize = 0;
+        let mut max_offset: u32 = 0;
+        let mut entry_len: u32 = 0;
         
         for vaddr in (start.bits()..end.bits())
             .step_by(TABLE_ENTRY_SIZE)
             .map(VirtAddr::from)
         {
             let entry = unsafe { &*vaddr.as_ptr::<CertTableEntry>() };
-
-            let current_len: usize = (entry.offset + entry.length) as usize;
             
-            if current_len > max_len {
-                max_len = current_len;
+            if entry.offset > max_offset {
+                max_offset = entry.offset;
+                entry_len = entry.length;
             }
 
             if entry.guid.is_zeroed() {
-                if max_len < SNP_GUEST_REQ_MAX_DATA_SIZE {
-                    return Some(max_len);
+                let certs_len: usize = (max_offset + entry_len) as usize;
+                if certs_len < SNP_GUEST_REQ_MAX_DATA_SIZE {
+                    return Some(certs_len);
                 } else {
                     return None;
                 }
@@ -568,32 +569,9 @@ impl SnpGuestRequestExtData {
         set_encrypted_region_4k(start, end)
     }
 
-    /// Clear the first `n` bytes from data
-    pub fn nclear(&mut self, n: usize) -> Result<(), SvsmReqError> {
-        self.data
-            .get_mut(..n)
-            .ok_or_else(SvsmReqError::invalid_parameter)?
-            .fill(0);
-        Ok(())
-    }
-
-    /// Fill up the `outbuf` slice provided with bytes from data
-    pub fn copy_to_slice(&self, outbuf: &mut [u8]) -> Result<(), SvsmReqError> {
-        let data = self
-            .data
-            .get(..outbuf.len())
-            .ok_or_else(SvsmReqError::invalid_parameter)?;
-        outbuf.copy_from_slice(data);
-        Ok(())
-    }
-
-    /// Check if the first `n` bytes from data are zeroed
-    pub fn is_nclear(&self, n: usize) -> Result<bool, SvsmReqError> {
-        let data = self
-            .data
-            .get(..n)
-            .ok_or_else(SvsmReqError::invalid_parameter)?;
-        Ok(data.iter().all(|e| *e == 0))
+    /// Clear the data
+    pub fn clear(&mut self) {
+        self.data.fill(0);
     }
 }
 
@@ -660,31 +638,27 @@ mod tests {
             pld: [0; MSG_PAYLOAD_SIZE],
         };
 
-        const PLAINTEXT: &[u8] = b"request-to-be-encrypted";
+        const REQUEST: &[u8] = b"request-to-be-encrypted";
         let vmpck0 = [5u8; VMPCK_SIZE];
         let vmpck0_seqno: u64 = 1;
 
-        msg.encrypt_set(
-            SnpGuestRequestMsgType::ReportRequest,
-            vmpck0_seqno,
-            &vmpck0,
-            PLAINTEXT,
-        )
-        .unwrap();
+        msg
+            .encrypt_set(
+                SnpGuestRequestMsgType::ReportRequest,
+                vmpck0_seqno,
+                &vmpck0,
+                REQUEST,
+            )
+            .unwrap();
 
-        let mut outbuf = [0u8; PLAINTEXT.len()];
-
-        let outbuf_len = msg
+        let decrypted_request = msg
             .decrypt_get(
                 SnpGuestRequestMsgType::ReportRequest,
                 vmpck0_seqno,
                 &vmpck0,
-                &mut outbuf,
             )
             .unwrap();
 
-        assert_eq!(outbuf_len, PLAINTEXT.len());
-
-        assert_eq!(outbuf, PLAINTEXT);
+        assert_eq!(decrypted_request, REQUEST);
     }
 }

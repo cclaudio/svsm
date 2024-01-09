@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-use core::{mem::size_of, slice::from_raw_parts, ptr::{addr_of, copy_nonoverlapping}};
+use core::{mem::size_of, slice::from_raw_parts, ptr::addr_of};
 
 use alloc::vec::Vec;
 
@@ -25,6 +25,7 @@ pub const REPORT_DATA_SIZE: usize = 64;
 ///        1: Sign with VCEK
 ///        2: Sign with VLEK
 ///        3: Reserved
+#[allow(dead_code)]
 #[repr(u32)]
 enum ReportKeySelection {
     VlekOtherwiseVcek = 0,
@@ -51,7 +52,9 @@ impl Default for SnpReportRequest {
     fn default() -> Self {
         Self {
             report_data: [0; REPORT_DATA_SIZE],
-            ..Default::default()
+            vmpl: 0,
+            flags: 0,
+            rsvd: [0; 24],
         }
     }
 }
@@ -66,45 +69,18 @@ impl SnpReportRequest {
         }
     }
 
-    pub fn set_report_data(&mut self, report_data: Vec<u8>) -> Result<(), SvsmReqError> {
+    pub fn set_report_data(&mut self, report_data: &[u8]) -> Result<(), SvsmReqError> {
         self.report_data
             .get_mut(..report_data.len())
             .ok_or_else(|| SvsmReqError::invalid_parameter())?
-            .copy_from_slice(report_data.as_slice());
+            .copy_from_slice(report_data);
         Ok(())
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        let ptr: *const u8 = addr_of!(self).cast::<u8>();
+        let ptr: *const u8 = addr_of!(*self).cast::<u8>();
         unsafe { from_raw_parts(ptr, size_of::<Self>()) }
     }
-
-    // /// Take a slice and return a reference for Self
-    // pub fn try_from_as_ref(buffer: &[u8]) -> Result<&Self, SvsmReqError> {
-    //     let buffer = buffer
-    //         .get(..size_of::<Self>())
-    //         .ok_or_else(SvsmReqError::invalid_parameter)?;
-
-    //     // SAFETY: SnpReportRequest has no invalid representations, as it is
-    //     // comprised entirely of integer types. It is repr(packed), so its
-    //     // required alignment is simply 1. We have checked the size, so this
-    //     // is entirely safe.
-    //     let request = unsafe { &*buffer.as_ptr().cast::<Self>() };
-
-    //     if !request.is_reserved_clear() {
-    //         return Err(SvsmReqError::invalid_parameter());
-    //     }
-    //     Ok(request)
-    // }
-
-    // pub fn is_vmpl0(&self) -> bool {
-    //     self.vmpl == 0
-    // }
-
-    // /// Check if the reserved field is clear
-    // fn is_reserved_clear(&self) -> bool {
-    //     self.rsvd.into_iter().all(|e| e == 0)
-    // }
 }
 
 ///  MSG_REPORT_RSP payload format (AMD SEV-SNP spec. table 23)
@@ -144,31 +120,15 @@ impl SnpReportResponse {
         Ok(response)
     }
 
-    /// Validate the [SnpReportResponse] fields
-    fn validate(&self) -> Result<(), SvsmReqError> {
+    pub fn get_report_vec(&self) -> Result<Vec<u8>, SvsmReqError> {
         if self.status != SnpReportResponseStatus::Success as u32 {
             return Err(SvsmReqError::invalid_request());
         }
-
-        if self.report_size != size_of::<AttestationReport>() as u32 {
+        if self.report_size as usize != size_of::<AttestationReport>() {
             return Err(SvsmReqError::invalid_format());
         }
-
-        Ok(())
-    }
-
-    pub fn get_report_vec(&self) -> Result<Vec<u8>, SvsmReqError> {
-        self.validate()?;
-
-        let report_size = self.report_size as usize;
-        let mut report = Vec::<u8>::with_capacity(report_size);
-
-        unsafe {
-            copy_nonoverlapping(addr_of!(self.report).cast::<u8>(), report.as_mut_ptr(), report_size);
-            report.set_len(report_size);
-        }
         
-        Ok(report)
+        Ok(self.report.as_vec())
     }
 }
 
@@ -247,6 +207,18 @@ pub struct AttestationReport {
     reserved2: [u8; 192],
     /// Signature of bytes 0h to 29Fh inclusive of this report
     signature: Signature,
+}
+
+impl AttestationReport {
+    fn as_vec(&self) -> Vec<u8> {
+        let report_size = size_of::<Self>();
+        let report_slice = unsafe { from_raw_parts(addr_of!(*self).cast::<u8>(), report_size) };
+
+        let mut report = Vec::<u8>::with_capacity(report_size);
+        report.extend_from_slice(report_slice);
+
+        report
+    }
 }
 
 const _: () = assert!(size_of::<AttestationReport>() <= u32::MAX as usize);

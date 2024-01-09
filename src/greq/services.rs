@@ -40,7 +40,7 @@ use crate::{
 ///        [`MSG_REPORT_RESP`](SnpReportResponse) size.
 /// * Error
 ///     * [`SvsmReqError`]
-pub fn get_regular_report(report_data: Vec<u8>) -> Result<Vec<u8>, SvsmReqError> {
+pub fn get_regular_report(report_data: &[u8]) -> Result<Vec<u8>, SvsmReqError> {
     let mut request = SnpReportRequest::new();
     request.set_report_data(report_data)?;
 
@@ -81,11 +81,11 @@ pub fn get_regular_report(report_data: Vec<u8>) -> Result<Vec<u8>, SvsmReqError>
 ///         * `certs` is not large enough to hold the certificates.
 ///             * `certs_buffer_size`: number of bytes required.
 ///             * `psp_rc`: PSP return code
-pub fn get_extended_report(report_data: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), SvsmReqError> {
+pub fn get_extended_report(report_data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SvsmReqError> {
     let mut request = SnpReportRequest::new();
     request.set_report_data(report_data)?;
 
-    let (response_vec, certs) = send_extended_guest_request(
+    let (response_vec, certs_vec) = send_extended_guest_request(
         SnpGuestRequestMsgType::ReportRequest,
         request.as_slice(),
     )?;
@@ -93,5 +93,5 @@ pub fn get_extended_report(report_data: Vec<u8>) -> Result<(Vec<u8>, Vec<u8>), S
     let response: &SnpReportResponse = SnpReportResponse::try_from_as_ref(response_vec.as_slice())?;
     let report_vec: Vec<u8> = response.get_report_vec()?;
 
-    Ok((report_vec, certs))
+    Ok((report_vec, certs_vec))
 }

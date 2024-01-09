@@ -21,7 +21,7 @@ use crate::{
     error::SvsmError,
     greq::msg::{SnpGuestRequestExtData, SnpGuestRequestMsg, SnpGuestRequestMsgType},
     locking::SpinLock,
-    protocols::errors::{SvsmReqError, SvsmResultCode},
+    protocols::errors::SvsmReqError,
     sev::{
         ghcb::GhcbError,
         secrets_page::{disable_vmpck0, get_vmpck0, is_vmpck0_clear, VMPCK_SIZE},
@@ -193,9 +193,10 @@ impl SnpGuestRequestDriver {
 
         // For security reasons, encrypt the message in protected memory (staging)
         // and then copy the result to shared memory (request)
-        self.staging
+        self
+            .staging
             .encrypt_set(msg_type, msg_seqno, &vmpck0, cmd_inbuf)?;
-        *self.request = *self.staging;
+        self.request.copy_from(&self.staging);
         Ok(())
     }
 
@@ -208,21 +209,10 @@ impl SnpGuestRequestDriver {
         let vmpck0: [u8; VMPCK_SIZE] = get_vmpck0();
 
         // For security reasons, decrypt the message in protected memory (staging)
-        *self.staging = *self.response;
-        let result = self
-            .staging
-            .decrypt_get(msg_type, msg_seqno, &vmpck0);
+        self.staging.copy_from(&self.response);
+        //*self.staging = *self.response;
 
-        if let Err(e) = result {
-            match e {
-                // The buffer provided is too small to store the unwrapped response.
-                // There is no need to clear the VMPCK0, just report it as invalid parameter.
-                SvsmReqError::RequestError(SvsmResultCode::INVALID_PARAMETER) => (),
-                _ => disable_vmpck0(),
-            }
-        }
-
-        result
+        self.staging.decrypt_get(msg_type, msg_seqno, &vmpck0)
     }
 
     /// Send the provided VMPL0 `SNP_GUEST_REQUEST` command to the PSP.
@@ -269,7 +259,6 @@ impl SnpGuestRequestDriver {
                 e
             {
                 // For some reason the hypervisor did not forward the request to the PSP.
-                //
                 // Because the message sequence number is used as part of the AES-GCM IV, it is important that the
                 // guest retry the request before allowing another request to be performed so that the IV cannot be
                 // reused on a new message payload.
@@ -288,6 +277,7 @@ impl SnpGuestRequestDriver {
                         } else {
                             // We sent a regular SNP_GUEST_REQUEST, but the hypervisor returned
                             // an error code that is exclusive for extended SNP_GUEST_REQUEST
+                            log::error!("SNP_GUEST_REQ_INVALID_LEN, but we sent a regular guest request");
                             disable_vmpck0();
                             return Err(SvsmReqError::invalid_request());
                         }
@@ -315,47 +305,13 @@ impl SnpGuestRequestDriver {
         let msg_seqno = self.seqno_last_used();
         let resp_msg_type = SnpGuestRequestMsgType::try_from(msg_type as u8 + 1)?;
 
-        self.decrypt_response(msg_seqno, resp_msg_type)
+        let result = self.decrypt_response(msg_seqno, resp_msg_type);
+        if result.is_err() {
+            log::error!("Failed to decrypt guest request message");
+            disable_vmpck0();
+        }
+        result
     }
-
-    
-    // pub fn send_regular_guest_request(
-    //     &mut self,
-    //     msg_type: SnpGuestRequestMsgType,
-    //     cmd_inbuf: &[u8],
-    // ) -> Result<Vec<u8>, SvsmReqError> {
-    //     self.send_request(SnpGuestRequestClass::Regular, msg_type, cmd_inbuf)
-    // }
-
-    // /// Send the provided extended `SNP_GUEST_REQUEST` command to the PSP
-    // pub fn send_extended_guest_request(
-    //     &mut self,
-    //     msg_type: SnpGuestRequestMsgType,
-    //     cmd_inbuf: &[u8],
-    // ) -> Result<(Vec<u8>, Vec<u8>), SvsmReqError> {
-    //     // self.set_user_extdata_size(certs.len())?;
-
-    //     let Ok(response) = self.send_request(
-    //         SnpGuestRequestClass::Extended,
-    //         msg_type,
-    //         cmd_inbuf,
-    //     )?;
-
-    //     let certs = self.ext_data.get_certificates().ok_or_else(|| SvsmReqError::invalid_format())?;
-
-    //     Ok((response, certs))
-
-    //     // // The SEV-SNP certificates can be used to verify the attestation report. At this point, a zeroed
-    //     // // ext_data buffer indicates that the certificates were not imported.
-    //     // // The VM owner can import them from the host using the virtee/snphost project
-    //     // if self.ext_data.is_nclear(certs.len())? {
-    //     //     log::warn!("SEV-SNP certificates not found. Make sure they were loaded from the host.");
-    //     // } else {
-    //     //     self.ext_data.copy_to_slice(certs)?;
-    //     // }
-
-    //     // Ok(outbuf_len)
-    // }
 }
 
 /// Initialize the global `SnpGuestRequestDriver`
@@ -392,6 +348,8 @@ pub fn send_extended_guest_request(
     let mut cell = GREQ_DRIVER.lock();
     let driver: &mut SnpGuestRequestDriver =
         cell.get_mut().ok_or_else(SvsmReqError::invalid_request)?;
+
+    driver.ext_data.clear();
 
     let response: Vec<u8> = driver.send_request(
         SnpGuestRequestClass::Extended,

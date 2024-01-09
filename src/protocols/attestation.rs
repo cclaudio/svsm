@@ -1,33 +1,34 @@
-/* SPDX-License-Identifier: MIT */
-/*
- * Copyright (C) 2023 IBM Corporation
- *
- * Authors: Claudio Carvalho <cclaudio@linux.ibm.com>
- *          Dov Murik <dovmurik@linux.ibm.com>
- */
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Copyright (C) 2023 IBM Corporation
+//
+// Authors: Claudio Carvalho <cclaudio@linux.ibm.com>
+//          Dov Murik <dovmurik@linux.ibm.com>
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use sha2::{Sha512, Digest};
-use core::mem::size_of;
-use core::slice::{from_raw_parts_mut, from_raw_parts};
+use core::{
+    mem::size_of,
+    slice::{from_raw_parts_mut, from_raw_parts},
+};
 
-use crate::address::{PhysAddr, Address, VirtAddr};
-
-use crate::fw_meta::Uuid;
-use crate::greq::services::{get_regular_report, get_extended_report};
-use crate::mm::{PerCPUPageMappingGuard, GuestPtr};
-
-use super::RequestParams;
-use super::errors::{SvsmReqError, SvsmResultCode};
-use super::services_manifest::{build_service_manifest_one, build_service_manifest_all};
+use crate::{
+    address::{Address, PhysAddr, VirtAddr},
+    crypto::hashes::{Sha2, Sha2Algorithms},
+    greq::services::{get_extended_report, get_regular_report},
+    mm::{GuestPtr, PerCPUPageMappingGuard, valid_phys_address},
+    protocols::{
+        errors::{SvsmReqError, SvsmResultCode},
+        RequestParams,
+        services_manifest::{build_service_manifest_all, build_service_manifest_one},
+    },
+    utils::uuid::Uuid,
+};
 
 /// SVSM spec, Table 10: Attestation Protocol Services
 const SVSM_ATTEST_SERVICES: u32 = 0;
 const SVSM_ATTEST_SINGLE_SERVICE: u32 = 1;
-
-const SVSM_FAIL_SNP_ATTESTATION: u64 = 0x8000_1000;
 
 #[derive(Debug)]
 struct AttestationResult {
@@ -49,58 +50,34 @@ impl AttestationResult {
     }
 }
 
-fn check_fits_into_one_page(gpa: PhysAddr, size: usize) -> Result<(), AttestationResult> {
-    if gpa.page_align() == (gpa + size).page_align() {
-        Ok(())
-    } else {
-        Err(AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER))
+/// Map a guest physical address into one page.
+fn map_gpa_into_4k_page(gpa: PhysAddr, size: usize, align: usize) -> Result<PerCPUPageMappingGuard, AttestationResult> {
+    if gpa.crosses_page(size) || !gpa.is_aligned(align) || !valid_phys_address(gpa) {
+        return Err(AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER));
     }
-}
-
-fn check_aligned(gpa: PhysAddr, align: usize) -> Result<(), AttestationResult> {
-    if gpa.is_aligned(align) {
-        Ok(())
-    } else {
-        Err(AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER))
-    }
-}
-
-fn check_page_aligned(gpa: PhysAddr) -> Result<(), AttestationResult> {
-    if gpa.is_page_aligned() {
-        Ok(())
-    } else {
-        Err(AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER))
-    }
-}
-
-fn map_gpa_into_one_page(gpa: PhysAddr, size: usize, align: usize) -> Result<(PerCPUPageMappingGuard, VirtAddr), AttestationResult> {
-    check_aligned(gpa, align)?;
-
-    // The nonce must not cross a 4KB boundary
-    check_fits_into_one_page(gpa, size)?;
-
-    // The nonce is not required to be page aligned
     let mapping = PerCPUPageMappingGuard::create_4k(gpa.page_align())
         .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_REQUEST))?;
-    let gva: VirtAddr = mapping.virt_addr() + gpa.page_offset();
-    Ok((mapping, gva))
+
+    Ok(mapping)
 }
 
-fn map_page_aligned_buffer<'a>(gpa: PhysAddr, size: usize) -> Result<(PerCPUPageMappingGuard, &'a [u8]), AttestationResult> {
-    check_page_aligned(gpa)?;
+/// Map a guest physical address (GPA). The GPA must be page aligned.
+fn map_page_aligned_buffer(gpa: PhysAddr, size: usize) -> Result<PerCPUPageMappingGuard, AttestationResult> {
+    if !gpa.is_page_aligned() || !valid_phys_address(gpa) {
+        return Err(AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER));
+    }
     let mapping = PerCPUPageMappingGuard::create(
         gpa,
         (gpa + size).page_align_up(),
         0,
     )
         .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_REQUEST))?;
-    let u8_slice = unsafe { from_raw_parts_mut(mapping.virt_addr().as_mut_ptr::<u8>(), size) };
-    Ok((mapping, u8_slice))
+    Ok(mapping)
 }
 
 /// SVSM Spec Chapter 7 (Attestation): Table 11: Attest Services operation
 #[derive(Clone, Copy, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 struct AttestServicesRequest {
     report_gpa: u64,
     report_size: u32,
@@ -117,20 +94,21 @@ struct AttestServicesRequest {
 }
 
 impl AttestServicesRequest {
-    fn build_report_data(&self, manifest: &Vec<u8>) -> Result<Vec<u8>, AttestationResult> {
+    fn build_report_data(&self, manifest: &[u8]) -> Result<Vec<u8>, AttestationResult> {
         let nonce_gpa = PhysAddr::from(self.nonce_gpa);
+        let nonce_size = usize::from(self.nonce_size);
 
         // The nonce must not cross a 4KB boundary and it's not
         // required to be page aligned
-        let (nonce_map, nonce_gva) = map_gpa_into_one_page(nonce_gpa,usize::from(self.nonce_size), 8)?;
-        let nonce_slice: &[u8] = unsafe { from_raw_parts(nonce_gva.as_ptr::<u8>(), self.nonce_size as usize) };
+        let nonce_map = map_gpa_into_4k_page(nonce_gpa, nonce_size, 8)?;
+        let nonce_gva: VirtAddr = nonce_map.virt_addr() + nonce_gpa.page_offset();
+        let nonce: &[u8] = unsafe { from_raw_parts(nonce_gva.as_ptr::<u8>(), nonce_size) };
 
-        // use rustcrypto to calculate a sha512 hash
-        let report_data: Vec<u8> = Sha512::new()
-            .chain_update(nonce_slice)
-            .chain_update(manifest.as_slice())
-            .finalize().to_vec();
-        
+        let mut data = Vec::<u8>::with_capacity(nonce.len() + manifest.len());
+        data.extend_from_slice(nonce);
+        data.extend_from_slice(manifest);
+
+        let report_data: Vec<u8> = Sha2::sha512(data.as_slice());
         Ok(report_data)
     }
 
@@ -141,90 +119,90 @@ impl AttestServicesRequest {
         let report_gpa = PhysAddr::from(self.report_gpa);
         let manifest_gpa = PhysAddr::from(self.services_manifest_gpa);
         let certs_gpa = PhysAddr::from(self.certs_gpa);
-        
-        //check_page_aligned(report_gpa)?;
-        //check_page_aligned(manifest_gpa)?;
 
-        let report_data = self.build_report_data(manifest)?;
+        let report_size = self.report_size as usize;
+        let manifest_size = self.services_manifest_size as usize;
+        let certs_size = self.certs_size as usize;
 
-        let (report_map, report_outbuf) = map_page_aligned_buffer(report_gpa, self.report_size as usize)?;
+        // The SVSM spec says that the provided output buffers (report,
+        // manifest and certs) must be updated ONLY upon successful completion
+        // of the SNP attestation request.
 
-        // let report_map = PerCPUPageMappingGuard::create(report_gpa, (report_gpa + self.report_size).page_align_up(), 0)?;
-        // let report_outbuf = unsafe { from_raw_parts_mut(report_map.virt_addr().as_mut_ptr::<u8>(), self.report_size as usize) };
+        let report_map = map_page_aligned_buffer(report_gpa, report_size)?;
+        let report_outbuf = unsafe { from_raw_parts_mut(report_map.virt_addr().as_mut_ptr::<u8>(), report_size) };
 
-        let (manifest_map, manifest_outbuf) = map_page_aligned_buffer(manifest_gpa, self.services_manifest_size as usize)?;
+        let manifest_map = map_page_aligned_buffer(manifest_gpa, manifest_size)?;
+        let manifest_outbuf = unsafe { from_raw_parts_mut(manifest_map.virt_addr().as_mut_ptr::<u8>(), manifest_size) };
 
-        // let manifest_map = PerCPUPageMappingGuard::create(manifest_gpa, (manifest_gpa + self.services_manifest_size).page_align_up(), 0)?;
-        // let manifest_outbuf = unsafe { from_raw_parts_mut(manifest_map.virt_addr().as_mut_ptr::<u8>(), self.services_manifest_size as usize) };
-
-        let (certs_map, certs_outbuf) = if self.certs_size > 0 {
+        let certs_map = if certs_size > 0 {
             if certs_gpa.is_null() {
                 return Err(AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER));
             }
-            //check_page_aligned(certs_gpa)?;
-            let (map, outbuf) = map_page_aligned_buffer(certs_gpa, self.certs_size as usize)?;
-            // let map = PerCPUPageMappingGuard::create(certs_gpa, (certs_gpa + self.certs_size as usize).page_align_up(), 0)?;
-            // let outbuf = unsafe { from_raw_parts_mut(map.virt_addr().as_mut_ptr::<u8>(), self.certs_size as usize) };
-            (Some(map), Some(outbuf))
+            let map = map_page_aligned_buffer(certs_gpa, certs_size)?;
+            Some(map)
         } else {
-            (None, None)
+            None
         };
 
-        if manifest.len() > manifest_outbuf.len() {
-            return Err(
-                AttestationResult {
-                    code: SvsmResultCode::INVALID_PARAMETER,
-                    services_manifest_size: manifest.len(),
-                    certs_size: 0,
-                    report_size: 0,
-                }
-            );
-        }
-
-        let mut certs_size: usize = 0;
-
-        let (report, certs) = if self.certs_size > 0 {
-            let (r, c) =  get_extended_report(report_data)
-                .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER))?;
-            certs_size = c.len();
-            if c.len() > self.certs_size as usize {
-                return Err(
-                    AttestationResult {
-                        code: SvsmResultCode::INVALID_PARAMETER,
-                        services_manifest_size: manifest.len(),
-                        certs_size,
-                        report_size: 0,
-                    }
-                );
+        // Check if the manifest fits into the output buffer
+        let manifest_outslice = manifest_outbuf
+            .get_mut(..manifest.len())
+            .ok_or_else(|| AttestationResult {
+                code: SvsmResultCode::INVALID_PARAMETER,
+                services_manifest_size: manifest.len(),
+                certs_size: 0,
+                report_size: 0,
             }
+        )?;
+
+        // Build the report data and request the attestation report
+        let report_data = self.build_report_data(manifest.as_slice())?;
+        let mut certs_len: usize = 0;
+        let (report, certs) = if self.certs_size > 0 {
+            let (r, c) =  get_extended_report(report_data.as_slice())
+                .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_REQUEST))?;
+            certs_len = c.len();
             (r, Some(c))
         } else {
-            let r = get_regular_report(report_data)
-                .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER))?;
+            let r = get_regular_report(report_data.as_slice())
+                .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_REQUEST))?;
             (r, None)
         };
 
-        if report.len() > self.report_size as usize {
-            return Err(
-                AttestationResult {
+        // Check if the returned report fits into the output buffer
+        let report_outslice = report_outbuf
+            .get_mut(..report.len())
+            .ok_or_else(|| AttestationResult {
                     code: SvsmResultCode::INVALID_PARAMETER,
                     services_manifest_size: manifest.len(),
-                    certs_size,
+                    certs_size: certs_len,
                     report_size: report.len(),
                 }
-            );
+            )?;
+
+        // Lastly, check if the returned certificates fit into the
+        // output buffer. If so, we can start updating all the output buffers.
+        if let (Some(map), Some(c)) = (certs_map, certs) {
+            let certs_outbuf = unsafe { from_raw_parts_mut(map.virt_addr().as_mut_ptr::<u8>(), certs_size) };
+            let certs_outslice = certs_outbuf
+                .get_mut(..certs_len)
+                .ok_or_else(|| AttestationResult {
+                        code: SvsmResultCode::INVALID_PARAMETER,
+                        services_manifest_size: manifest.len(),
+                        certs_size: certs_len,
+                        report_size: 0,
+                    }
+                )?;
+            certs_outslice.copy_from_slice(c.as_slice());
         }
 
-        manifest_outbuf[..manifest.len()].copy_from_slice(&manifest);
-        report_outbuf[..report.len()].copy_from_slice(&report);
-        if let (Some(mut outbuf), Some(c)) = (certs_outbuf, certs) {
-            outbuf[..c.len()].copy_from_slice(&c);
-        }
+        manifest_outslice.copy_from_slice(manifest.as_slice());
+        report_outslice.copy_from_slice(report.as_slice());
 
         Ok( AttestationResult {
             code: SvsmResultCode::SUCCESS,
             services_manifest_size: manifest.len(),
-            certs_size,
+            certs_size: certs_len,
             report_size: report.len(),
         })
     }
@@ -232,7 +210,7 @@ impl AttestServicesRequest {
 
 /// SVSM Spec Chapter 7 (Attestation): Table 13: Attest Single Service operation
 #[derive(Clone, Copy, Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 struct AttestSingleServiceRequest {
     base: AttestServicesRequest,
     service_guid: [u8; 16],
@@ -248,7 +226,8 @@ fn handle_attest_services_request(params: &mut RequestParams) ->Result<Attestati
 
     // The AttestServicesRequest structure must not cross 4KB boundary and
     // it's not required to be page aligned
-    let (_request_map, request_gva) = map_gpa_into_one_page(request_gpa, request_size, 8)?;
+    let request_map = map_gpa_into_4k_page(request_gpa, request_size, 8)?;
+    let request_gva = request_map.virt_addr() + request_gpa.page_offset();
 
     let guest_ptr = GuestPtr::<AttestServicesRequest>::new(request_gva);
     let mut request = guest_ptr
@@ -256,85 +235,30 @@ fn handle_attest_services_request(params: &mut RequestParams) ->Result<Attestati
         .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_ADDRESS))?;
 
     let manifest = build_service_manifest_all();
-    
+
     request.attest_service_manifest(&manifest)
-
-
-
-
-
-
-    // let request_gpa: PhysAddr = PhysAddr::new((*vmsa).rcx());
-    // let r: AttestationResult = match handle_attest_services_request_inner(request_gpa) {
-    //     Ok(r) => r,
-    //     Err(r) => r,
-    // };
-    // (*vmsa).set_rax(r.code);
-    // (*vmsa).set_rcx(r.services_manifest_size);
-    // (*vmsa).set_rdx(r.certs_size);
-    // (*vmsa).set_r8(r.report_size);
 }
-
 
 fn handle_attest_single_service_request(params: &mut RequestParams) -> Result<AttestationResult, AttestationResult> {
     let request_gpa = PhysAddr::from(params.rcx);
     let request_size = size_of::<AttestSingleServiceRequest>();
 
-    check_fits_into_one_page(request_gpa, request_size)?;
+    // The AttestSingleServiceRequest structure must not cross 4KB boundary and
+    // it's not required to be page aligned
+    let request_map = map_gpa_into_4k_page(request_gpa, request_size, 8)?;
+    let request_gva = request_map.virt_addr() + request_gpa.page_offset();
 
-    let mapping = PerCPUPageMappingGuard::create(
-        request_gpa.page_align(),
-        (request_gpa + request_size).page_align_up(),
-        0,
-    )
-        .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_REQUEST))?;
-
-    // The AttestSingleServiceRequest structure is not required to be page aligned
-    let request_gva = mapping.virt_addr() + request_gpa.page_offset();
     let guest_ptr = GuestPtr::<AttestSingleServiceRequest>::new(request_gva);
     let mut request = guest_ptr
         .read()
         .map_err(|_| AttestationResult::from_code(SvsmResultCode::INVALID_ADDRESS))?;
 
+    // Build the manifest only for the service GUID provided
     let service_guid = Uuid::from(&request.service_guid);
     let manifest = build_service_manifest_one(&service_guid)
         .ok_or_else(|| AttestationResult::from_code(SvsmResultCode::INVALID_PARAMETER))?;
 
-    request.base.attest_service_manifest(manifest)
-
-
-
-    // /// set params accordingly
-    // /// certificate data buffer too small
-    // ///     RCX = manifest size
-    // ///     RDX = certificate size required
-    // ///     INVALID_PARAMETER
-    // /// 
-    // /// report buffer too small
-    // ///     RCX = manifest size
-    // ///     RDX = certificate size, if supplied
-    // ///     R8 = attestation report size required
-    // ///     INVALID_PARAMETER
-
-    // // Upon successful completion of the attestation request
-    // request.base.set_report(report);
-    // request.base.set_manifest(manifest);
-    // params.rcx = manifest.len();
-    // // if certs gpa is provided
-    // request.base.set_certs(certs);
-    // params.rdx = certs.len();
-
-    // // if attestation request fails
-    // params.rax = 0x8000_1000;
-
-    // // let r: AttestationResult = match handle_attest_single_services_request_inner(request_gpa) {
-    // //     Ok(r) => r,
-    // //     Err(r) => r,
-    // // };
-    // // (*vmsa).set_rax(r.code);
-    // // (*vmsa).set_rcx(r.services_manifest_size);
-    // // (*vmsa).set_rdx(r.certs_size);
-    // // (*vmsa).set_r8(r.report_size);
+    request.base.attest_service_manifest(&manifest)
 }
 
 pub fn attestation_protocol_request(request: u32, params: &mut RequestParams) -> Result<(), SvsmReqError> {

@@ -8,6 +8,7 @@ pub mod bitmap_allocator;
 pub mod immut_after_init;
 pub mod memory_region;
 pub mod util;
+pub mod uuid;
 
 pub use memory_region::MemoryRegion;
 pub use util::{align_down, align_up, halt, overlap, page_align_up, page_offset, zero_mem_region};

@@ -11,6 +11,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use svsm::fw_meta::{parse_fw_meta_data, print_fw_meta, validate_fw_memory, SevFWMetaData};
+use svsm::protocols::services_manifest::protocols_init_services;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -473,6 +474,8 @@ pub extern "C" fn svsm_main() {
     }
 
     guest_request_driver_init();
+
+    protocols_init_services();
 
     if let Some(ref fw_meta) = fw_metadata {
         prepare_fw_launch(fw_meta).expect("Failed to setup guest VMSA");
