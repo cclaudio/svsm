@@ -1,6 +1,9 @@
 FEATURES ?= "default"
 CARGO_ARGS = --features ${FEATURES}
 
+FEATURES_TEST ?= "default-test"
+CARGO_ARGS_TEST = --no-default-features --features ${FEATURES_TEST}
+
 ifdef RELEASE
 TARGET_PATH=release
 CARGO_ARGS += --release
@@ -10,8 +13,10 @@ endif
 
 ifeq ($(V), 1)
 CARGO_ARGS += -v
+CARGO_ARGS_TEST += -v
 else ifeq ($(V), 2)
 CARGO_ARGS += -vv
+CARGO_ARGS_TEST += -vv
 endif
 
 STAGE2_ELF = "target/x86_64-unknown-none/${TARGET_PATH}/stage2"
@@ -47,7 +52,7 @@ bin/coconut-hyperv.igvm: $(IGVMBLD) stage1/kernel.elf stage1/stage2.bin
 	$(IGVMBLD) --output $@ --stage2 stage1/stage2.bin --kernel stage1/kernel.elf --hyperv --com-port 3
 
 test:
-	cargo test --target=x86_64-unknown-linux-gnu
+	cargo test ${CARGO_ARGS_TEST} --target=x86_64-unknown-linux-gnu
 
 test-in-svsm: utils/cbit stage1/test-kernel.elf svsm.bin
 	./scripts/test-in-svsm.sh
