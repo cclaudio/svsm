@@ -9,3 +9,5 @@
 
 /// FFI bindings
 mod bindings;
+/// Functions required to build the Microsoft TPM libraries
+mod wrapper;
