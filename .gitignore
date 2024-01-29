@@ -10,3 +10,4 @@ stage1/stage1
 print-meta
 cbit
 .idea/
+src/vtpm/mstpm/bindings.rs
