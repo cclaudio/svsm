@@ -60,6 +60,9 @@ test-in-svsm: utils/cbit stage1/test-kernel.elf svsm.bin
 doc:
 	cargo doc --open --all-features --document-private-items
 
+libvtpm/libvtpm.a:
+	make -C libvtpm
+
 src/vtpm/mstpm/bindings.rs: libvtpm/bindings.rs
 	cp libvtpm/bindings.rs $@
 
@@ -82,7 +85,7 @@ stage1/stage2.bin:
 	cargo build ${CARGO_ARGS} --bin stage2
 	objcopy -O binary ${STAGE2_ELF} $@
 
-stage1/kernel.elf: src/vtpm/mstpm/bindings.rs
+stage1/kernel.elf: src/vtpm/mstpm/bindings.rs libvtpm/libvtpm.a
 	cargo build ${CARGO_ARGS} --bin svsm
 	objcopy -O elf64-x86-64 --strip-unneeded ${KERNEL_ELF} $@
 
@@ -114,5 +117,6 @@ clean:
 
 distclean: clean
 	rm -f src/vtpm/mstpm/bindings.rs
+	$(MAKE) -C libvtpm $@
 
 .PHONY: stage1/stage2.bin stage1/kernel.elf stage1/test-kernel.elf svsm.bin clean stage1/svsm-fs.bin test test-in-svsm distclean

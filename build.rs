@@ -17,6 +17,10 @@ fn main() {
     println!("cargo:rustc-link-arg-bin=svsm=--no-relax");
     println!("cargo:rustc-link-arg-bin=svsm=-Tsrc/svsm.lds");
     println!("cargo:rustc-link-arg-bin=svsm=-no-pie");
+    if std::env::var("CARGO_FEATURE_VTPM").is_ok() {
+        println!("cargo:rustc-link-arg-bin=svsm=-Llibvtpm");
+        println!("cargo:rustc-link-arg-bin=svsm=-lvtpm");
+    }
 
     // Extra linker args for tests.
     println!("cargo:rerun-if-env-changed=LINK_TEST");
