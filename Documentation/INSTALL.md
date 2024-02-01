@@ -176,6 +176,14 @@ Building the SVSM itself requires:
 - `x86_64-unknown-none` target toolchain installed (`rustup target add x86_64-unknown-none`)
 - `binutils` >= 2.39
 
+Also make sure you have the Microsoft TPM build dependencies installed. On OpenSUSE
+you can do this by:
+```
+$ sudo zypper in system-user-mail make gcc curl patterns-devel-base-devel_basis \
+      glibc-devel-static git libclang13 autoconf autoconf-archive pkg-config \
+      automake libopenssl-devel
+```
+
 Then checkout the SVSM repository and build the SVSM binary:
 
 ```
